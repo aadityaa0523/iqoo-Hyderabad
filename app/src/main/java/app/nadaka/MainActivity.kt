@@ -166,6 +166,9 @@ object Settings {
 class MainActivity : ComponentActivity() {
     private lateinit var preview: PreviewView
     private lateinit var hud: Hud
+    private lateinit var root: FrameLayout
+    private lateinit var gear: android.widget.Button
+    private lateinit var settings: SettingsPanel
     private lateinit var feedback: Feedback
     private val analysisThread = Executors.newSingleThreadExecutor()
     private val detector by lazy { Detector(this) } // created on the analysis thread
@@ -212,10 +215,35 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        preview = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
+        Prefs.load(this)
+        preview = PreviewView(this).apply {
+            scaleType = PreviewView.ScaleType.FIT_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE // TextureView: lets us filter the image
+        }
         hud = Hud(this)
-        setContentView(FrameLayout(this).apply { addView(preview); addView(hud) })
+        settings = SettingsPanel(this, say = { feedback.say(it) }, onChange = ::applyDisplay, onLesson = { feedback.lesson() })
+        val gear = android.widget.Button(this).apply {
+            text = "Settings"
+            isAllCaps = false
+            contentDescription = "Settings"
+            setOnClickListener { if (settings.open) settings.hide() else settings.show() }
+        }
+        root = FrameLayout(this).apply {
+            addView(preview); addView(hud)
+            addView(gear, FrameLayout.LayoutParams(-2, -2, android.view.Gravity.TOP or android.view.Gravity.START).apply {
+                topMargin = (150 * resources.displayMetrics.density).toInt(); leftMargin = (16 * resources.displayMetrics.density).toInt()
+            })
+            // Above the navigation bar; the panel has its own Done, so the Settings button hides while it is open.
+            addView(settings.view, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.BOTTOM).apply {
+                bottomMargin = (56 * resources.displayMetrics.density).toInt()
+            })
+        }
+        this.gear = gear
+        settings.onOpenChange = { open -> gear.visibility = if (open) android.view.View.GONE else android.view.View.VISIBLE }
+        setContentView(root)
         feedback = Feedback(this)
+        applyDisplay()
+        if (!Prefs.wizardDone) hud.post { settings.show(wizard = true) }
         ego = EgoMotion(this)
         egoLog = EgoLog(this)
         // Record mode for ego-motion training data (team only; blind users never need it).
@@ -238,6 +266,20 @@ class MainActivity : ComponentActivity() {
             feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
                          else "Voice problem: $why.")
         }
+    }
+
+    /** Palette, text size and camera filter changed: repaint everything (live preview in the settings). */
+    private fun applyDisplay() {
+        applyCameraView(preview)
+        root.setBackgroundColor(if (Prefs.palette.highContrast) Prefs.palette.bg else android.graphics.Color.BLACK)
+        val p = Prefs.palette
+        gear.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18f * Prefs.textScale)
+        gear.setTextColor(if (p.highContrast) p.bg else 0xFF101820.toInt())
+        gear.background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(if (p.highContrast) p.fg else 0xFFFFB300.toInt()); cornerRadius = 40f
+            setStroke(6, if (p.highContrast) p.bg else android.graphics.Color.WHITE)
+        }
+        hud.invalidate()
     }
 
     override fun onResume() {
@@ -424,7 +466,7 @@ class MainActivity : ComponentActivity() {
             if (done) reading = false
             Log.d(TAG, "READ ocr ${SystemClock.elapsedRealtime() - t1}ms  ${speech.orEmpty()}")
             val st = HudState(mode = "READ", said = said, imgW = frame.width, imgH = frame.height)
-            hud.post { hud.show(st) }
+            hud.post { hud.show(st); hud.contentDescription = said }
             return
         }
         latestFrame = frame
@@ -483,7 +525,7 @@ class MainActivity : ComponentActivity() {
             level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
         )
-        hud.post { hud.show(st) }
+        hud.post { hud.show(st); hud.contentDescription = said }
     }
 }
 

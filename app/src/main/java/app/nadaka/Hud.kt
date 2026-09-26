@@ -41,13 +41,32 @@ class Hud(ctx: Context) : View(ctx) {
     private var s = HudState()
     private val dp = resources.displayMetrics.density
 
-    private val amber = 0xFFFFB300.toInt()
-    private val red = 0xFFFF453A.toInt()
-    private val orange = 0xFFFF9F0A.toInt()
-    private val green = 0xFF32D74B.toInt()
-    private val grey = 0xFFAEB7C2.toInt()
-    private val ink = 0xFF101820.toInt()
-    private val card = 0xE6101820.toInt()
+    // Colours come from the chosen palette (A11y.kt); high-contrast palettes use one fg/bg pair only.
+    private var amber = 0
+    private var red = 0
+    private var orange = 0
+    private var green = 0
+    private var grey = 0
+    private var ink = 0
+    private var card = 0
+    private var txt = Color.WHITE // main text
+    private var onDanger = Color.WHITE // text on a danger/red fill
+    private var ts = 1f // text scale
+    private var weight = 1f // outline weight
+
+    private fun applyPalette() {
+        val p = Prefs.palette
+        ts = Prefs.textScale
+        if (p.highContrast) {
+            amber = p.fg; red = p.fg; orange = p.fg; green = p.fg; grey = p.fg; txt = p.fg
+            ink = p.bg; onDanger = p.bg; card = p.bg; weight = 1.8f
+        } else {
+            amber = 0xFFFFB300.toInt(); red = 0xFFFF453A.toInt(); orange = 0xFFFF9F0A.toInt(); green = 0xFF32D74B.toInt()
+            grey = 0xFFAEB7C2.toInt(); ink = 0xFF101820.toInt(); card = 0xE6101820.toInt(); txt = Color.WHITE; onDanger = Color.WHITE
+            weight = 1f
+        }
+        body.color = grey
+    }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
@@ -61,6 +80,7 @@ class Hud(ctx: Context) : View(ctx) {
     }
 
     override fun onDraw(c: Canvas) {
+        applyPalette()
         val scale = min(width / s.imgW.toFloat(), height / s.imgH.toFloat())
         val ox = (width - s.imgW * scale) / 2
         val oy = (height - s.imgH * scale) / 2
@@ -101,7 +121,7 @@ class Hud(ctx: Context) : View(ctx) {
         val col = colorOf(t)
         // Corner brackets: mark the object without hiding it.
         stroke.color = col
-        stroke.strokeWidth = 3.5f * dp
+        stroke.strokeWidth = 3.5f * dp * weight
         val k = min(r.width(), r.height()) * 0.22f
         for (corner in 0..3) {
             val x = if (corner % 2 == 0) r.left else r.right
@@ -116,24 +136,24 @@ class Hud(ctx: Context) : View(ctx) {
             if (!t.metres.isNaN()) append("  ·  %.1f m".format(t.metres))
             if (t.approaching) append("  ·  approaching") else if (t.moving) append("  ·  moving")
         }
-        bold.textSize = 13 * dp
+        bold.textSize = 13 * dp * ts
         val w = bold.measureText(label) + 20 * dp
         val top = (r.top - 30 * dp).coerceAtLeast(150 * dp)
         fill.color = col
         c.drawRoundRect(RectF(r.left, top, r.left + w, top + 24 * dp), 12 * dp, 12 * dp, fill)
-        bold.color = if (t.approaching) Color.WHITE else ink
+        bold.color = if (t.approaching) onDanger else ink
         c.drawText(label, r.left + 10 * dp, top + 16.5f * dp, bold)
-        bold.color = Color.WHITE
+        bold.color = txt
     }
 
     private fun pill(c: Canvas, right: Float, y: Float, label: String, bg: Int, fg: Int): Float {
-        bold.textSize = 12 * dp
+        bold.textSize = 12 * dp * ts
         val w = bold.measureText(label) + 24 * dp
         fill.color = bg
         c.drawRoundRect(RectF(right - w, y, right, y + 28 * dp), 14 * dp, 14 * dp, fill)
         bold.color = fg
         c.drawText(label, right - w + 12 * dp, y + 18.5f * dp, bold)
-        bold.color = Color.WHITE
+        bold.color = txt
         return right - w - 8 * dp
     }
 
@@ -150,12 +170,12 @@ class Hud(ctx: Context) : View(ctx) {
             c.drawArc(RectF(mx - rr, my - rr, mx + rr, my + rr), 225f, 90f, false, stroke)
         }
         stroke.alpha = 255
-        fill.color = Color.WHITE
+        fill.color = txt
         c.drawCircle(mx, my, 3 * dp, fill)
 
-        bold.textSize = 24 * dp
+        bold.textSize = 24 * dp * ts
         c.drawText("Nadaka", 56 * dp, y + 22 * dp, bold)
-        body.textSize = 12 * dp
+        body.textSize = 12 * dp * ts
         fill.color = if (s.backend == "NPU" || s.backend.isEmpty()) green else orange
         c.drawCircle(60 * dp, y + 38 * dp, 3.5f * dp, fill)
         val tech = if (s.backend.isEmpty()) "Reading, on-device"
@@ -169,10 +189,14 @@ class Hud(ctx: Context) : View(ctx) {
         }
         var right = width - 16 * dp
         right = pill(c, right, y + 2 * dp, modeLabel, amber, ink)
-        if (s.rec.isNotEmpty()) pill(c, right, y + 2 * dp, s.rec, red, Color.WHITE)
+        if (s.rec.isNotEmpty()) pill(c, right, y + 2 * dp, s.rec, red, onDanger)
         var right2 = width - 16 * dp
-        if (s.health != Health.OK) right2 = pill(c, right2, y + 60 * dp, s.health.name.lowercase().replaceFirstChar { it.uppercase() }, red, Color.WHITE)
-        if (s.heat != HeatTier.NOMINAL) pill(c, right2, y + 60 * dp, "Heat: ${s.heat.name.lowercase()}", if (s.heat == HeatTier.WARM) orange else red, Color.WHITE)
+        if (s.health != Health.OK) right2 = pill(c, right2, y + 60 * dp, s.health.name.lowercase().replaceFirstChar { it.uppercase() }, red, onDanger)
+        Prefs.status().takeIf { it.isNotEmpty() }?.let { st -> // caregivers can verify the profile is on
+            body.textSize = 11 * dp * ts
+            c.drawText(st, 20 * dp, y + 118 * dp * ts, body)
+        }
+        if (s.heat != HeatTier.NOMINAL) pill(c, right2, y + 60 * dp, "Heat: ${s.heat.name.lowercase()}", if (s.heat == HeatTier.WARM) orange else red, onDanger)
     }
 
     private fun drawHazardBanner(c: Canvas) {
@@ -181,23 +205,25 @@ class Hud(ctx: Context) : View(ctx) {
             ?: return
         val y = height * 0.40f
         fill.color = red
-        c.drawRoundRect(RectF(24 * dp, y, width - 24 * dp, y + 52 * dp), 26 * dp, 26 * dp, fill)
-        bold.textSize = 18 * dp
-        c.drawText(msg, (width - bold.measureText(msg)) / 2, y + 33 * dp, bold)
+        c.drawRoundRect(RectF(24 * dp, y, width - 24 * dp, y + 52 * dp * ts), 26 * dp, 26 * dp, fill)
+        bold.textSize = 18 * dp * ts
+        bold.color = onDanger
+        c.drawText(msg, (width - bold.measureText(msg)) / 2, y + 33 * dp * ts, bold)
+        bold.color = txt
     }
 
-    private fun captionTop() = height - 150 * dp // clear of the navigation bar
+    private fun captionTop() = height - (54 + 96 * ts) * dp // clear of the navigation bar
 
     private fun drawCaption(c: Canvas) {
         val top = captionTop()
-        val box = RectF(16 * dp, top, width - 16 * dp, top + 96 * dp)
+        val box = RectF(16 * dp, top, width - 16 * dp, top + 96 * dp * ts)
         fill.color = card
         c.drawRoundRect(box, 22 * dp, 22 * dp, fill)
         fill.color = when (s.level) { Buzz.WARN, Buzz.APPROACH -> red; Buzz.AHEAD -> orange; else -> amber }
         c.drawRoundRect(RectF(box.left + 12 * dp, top + 16 * dp, box.left + 17 * dp, top + 80 * dp), 3 * dp, 3 * dp, fill)
-        body.textSize = 11 * dp
+        body.textSize = 11 * dp * ts
         c.drawText(if (Settings.hapticsFirst) "WHAT THE USER FEELS AND HEARS  ·  vibration first" else "WHAT THE USER HEARS", box.left + 30 * dp, top + 26 * dp, body)
-        bold.textSize = 19 * dp
+        bold.textSize = 19 * dp * ts
         var line = ""
         var y = top + 54 * dp
         for (wd in s.said.ifEmpty { "Watching the path." }.split(" ")) {
@@ -221,7 +247,7 @@ class Hud(ctx: Context) : View(ctx) {
             val rr = rad * m / 10f
             c.drawArc(RectF(cx - rr, cy - rr, cx + rr, cy + rr), 210f, 120f, false, stroke)
         }
-        body.textSize = 9 * dp
+        body.textSize = 9 * dp * ts
         c.drawText("5 m", cx + 3 * dp, cy - rad / 2 - 3 * dp, body)
         c.drawText("10 m", cx + 3 * dp, cy - rad - 3 * dp, body)
         for (t in s.tracks) {
@@ -231,7 +257,7 @@ class Hud(ctx: Context) : View(ctx) {
             fill.color = colorOf(t)
             c.drawCircle(cx + rr * cos(a), cy + rr * sin(a), 5 * dp, fill)
         }
-        fill.color = Color.WHITE
+        fill.color = txt
         c.drawCircle(cx, cy, 4 * dp, fill)
     }
 
@@ -254,7 +280,7 @@ class Hud(ctx: Context) : View(ctx) {
         stroke.color = 0x88FFFFFF.toInt()
         stroke.strokeWidth = 1 * dp
         c.drawRoundRect(RectF(x0, y0, x0 + w, y0 + h), 6 * dp, 6 * dp, stroke)
-        body.textSize = 10 * dp
+        body.textSize = 10 * dp * ts
         c.drawText("Depth · ${s.depthBackend}", x0, y0 - 6 * dp, body)
     }
 }
