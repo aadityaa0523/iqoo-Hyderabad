@@ -102,6 +102,7 @@ class AlertPolicy {
     private var lastCrowdMs = -1_000_000L
     private val spokenHeight = HashMap<Int, Float>()
     private val movingSaidMs = HashMap<Int, Long>()
+    private val staticSaidMs = HashMap<String, Long>() // "chair@12" -> time: survives track ID changes
 
     /** True while the camera has been unusable long enough that detections are not trusted. */
     val blind get() = health != Health.OK
@@ -179,18 +180,22 @@ class AlertPolicy {
                 now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
         }.minByOrNull { it.metres }?.let {
             movingSaidMs[it.id] = now; lastInfoMs = now
-            return listOf(Alert(phrase("${name(it)} moving", metres(it.metres), clock(it.bearing)), Buzz.SIDE))
+            val words = phrase("${name(it)} moving", metres(it.metres), clock(it.bearing))
+            return listOf(Alert(words, Buzz.SIDE, short = words))
         }
 
-        if (!walking) return out // standing still: static things are not news
+        // Static things within 5 m, walking or standing: each once, again only once it looms 50% bigger.
         val range = if (Settings.chatty) Float.MAX_VALUE else Settings.staticRangeM
         val t = known.filter {
             it.sure && !it.moving && !it.edge && it.metres <= range && inPath(it, Settings.staticPathDeg) && !(crowd && it.label == "person") &&
-                spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth }
-        }.minByOrNull { it.metres } ?: return out // once per object; again only once it looms 30% bigger
+                spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth } &&
+                now - (staticSaidMs["${it.label}@${clock(it.bearing)}"] ?: -1_000_000L) >= Settings.staticRepeatMs
+        }.minByOrNull { it.metres } ?: return out
         spokenHeight[t.id] = t.box.height()
+        staticSaidMs["${t.label}@${clock(t.bearing)}"] = now
         lastInfoMs = now
         val c = clock(t.bearing)
-        return listOf(Alert(phrase(t.label, metres(t.metres), c), if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE))
+        val words = phrase(t.label.replaceFirstChar { it.uppercase() }, metres(t.metres), c)
+        return listOf(Alert(words, if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE, short = words))
     }
 }

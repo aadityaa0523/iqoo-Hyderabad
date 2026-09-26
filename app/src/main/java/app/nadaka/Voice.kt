@@ -2,7 +2,11 @@ package app.nadaka
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
+import android.util.Log
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -85,50 +89,162 @@ object Answers {
 enum class Ask { SAFETY, DESCRIBE, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
+/** Typical recognizer slips on short commands, normalised before matching. */
+private val FIXUPS = listOf(
+    Regex("""\bwhat'?s a head\b""") to "what's ahead", Regex("""\bwhat is a head\b""") to "what is ahead",
+    Regex("""\bwatts?\b""") to "what's", Regex("""\bwhats\b""") to "what's",
+    Regex("""\bred (this|it|that)\b""") to "read $1", Regex("""\breed\b""") to "read",
+    Regex("""\bsave\b""") to "safe", Regex("""\bkross\b""") to "cross",
+)
+
+fun normalise(text: String): String {
+    var t = text.lowercase().replace(Regex("""[?!.,;:]"""), " ").replace(Regex("""\s+"""), " ").trim()
+    FIXUPS.forEach { (r, to) -> t = r.replace(t, to) }
+    return t
+}
+
+/** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 fun intentOf(text: String): Ask {
-    if (SafetyGate.isSafetyQuestion(text)) return Ask.SAFETY
-    val t = text.lowercase()
+    val t = normalise(text)
+    if (SafetyGate.isSafetyQuestion(t)) return Ask.SAFETY
     return when {
-        Regex("""\b(read|money|note|rupee|medicine|tablet|strip|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
+        Regex("""\b(read|money|note|notes|rupee|rupees|medicine|tablet|strip|currency|cash|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
         Regex("""\b(teach|learn|lesson)\b|\bvibrations?\b.*\bmean""").containsMatchIn(t) -> Ask.LEARN
-        Regex("""\b(use speech|speak to me|talk to me|voice mode|speech mode)""").containsMatchIn(t) -> Ask.SPEECH
+        Regex("""\b(use speech|speak to me|talk to me|voice mode|speech mode|speak everything)""").containsMatchIn(t) -> Ask.SPEECH
         Regex("""\b(use vibration|vibration mode|vibrate only|haptic)""").containsMatchIn(t) -> Ask.HAPTIC
         Regex("""\b(talk more|more detail|chatty|tell me everything)""").containsMatchIn(t) -> Ask.CHATTY
         Regex("""\b(quiet|less|silent|shut up|stop talking)""").containsMatchIn(t) -> Ask.QUIET
-        Regex("""\b(what|see|ahead|around|front|describe|kya hai|dikh)""").containsMatchIn(t) || "क्या" in t || "ఏమి" in t -> Ask.DESCRIBE
+        Regex("""\b(what|see|ahead|around|front|describe|near|nearby|there|surroundings|kya hai|dikh)""").containsMatchIn(t) || "क्या" in t || "ఏమి" in t -> Ask.DESCRIBE
         else -> Ask.HELP
     }
+}
+
+/** Picks the first recognizer alternative that means something (n-best), else the top one. */
+fun bestIntent(alternatives: List<String>): Pair<String, Ask> {
+    // Safety in ANY alternative wins: if the person might have asked "can I cross", treat it so.
+    alternatives.firstOrNull { intentOf(it) == Ask.SAFETY }?.let { return it to Ask.SAFETY }
+    alternatives.firstOrNull { intentOf(it) != Ask.HELP }?.let { return it to intentOf(it) }
+    return (alternatives.firstOrNull() ?: "") to Ask.HELP
 }
 
 const val HELP_TEXT = "You can ask: what's ahead, is it safe, read this, use speech, use vibration, or teach me the vibrations."
 
 /** On-device speech recognition (no network). One utterance per [listen] call; main thread only. */
-class VoiceInput(ctx: Context, private val onText: (String) -> Unit, private val onFail: () -> Unit) : RecognitionListener {
-    private val rec: SpeechRecognizer? = when {
-        SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx) -> SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
-        SpeechRecognizer.isRecognitionAvailable(ctx) -> SpeechRecognizer.createSpeechRecognizer(ctx)
-        else -> null
-    }?.also { it.setRecognitionListener(this) }
+/**
+ * Push-to-talk speech recognition, on-device (no network). Why the first version missed words:
+ * the recognizer needs ~0.3-1 s to open the microphone, users started talking immediately; each
+ * press restarted the session; and our own speech/vibration could run while it listened.
+ * Now: the "ready" cue comes only when the mic is actually open (onReadyForSpeech), a second press
+ * ends the utterance, the app is silent while listening, and all n-best alternatives plus partial
+ * results are used. Main thread only.
+ */
+class VoiceInput(
+    ctx: Context,
+    private val onReady: () -> Unit,
+    private val onText: (List<String>) -> Unit,
+    private val onFail: (String) -> Unit,
+) : RecognitionListener {
+    // Two engines: the strictly on-device one (needs its language pack) and the system default
+    // (Google Speech Services, offline when its pack is present). Start with whichever can work now.
+    private val onDevice = if (SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx))
+        SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).also { it.setRecognitionListener(this) } else null
+    private val system = if (SpeechRecognizer.isRecognitionAvailable(ctx))
+        SpeechRecognizer.createSpeechRecognizer(ctx).also { it.setRecognitionListener(this) } else null
+    private var rec: SpeechRecognizer? = onDevice ?: system
+    private var retried = false
+    private var partial: String? = null
 
-    val available get() = rec != null
+    init {
+        // Found on the loaner: the on-device English pack was missing ("language pack not installed"),
+        // so every question failed. Check it, fall back to the system engine, and fetch the pack.
+        if (onDevice != null && Build.VERSION.SDK_INT >= 33) {
+            onDevice.checkRecognitionSupport(intent(), ctx.mainExecutor, object : RecognitionSupportCallback {
+                override fun onSupportResult(r: RecognitionSupport) {
+                    val lang = Settings.voiceLanguage
+                    Log.i(TAG, "on-device speech: installed=${r.installedOnDeviceLanguages} pending=${r.pendingOnDeviceLanguages}")
+                    if (lang !in r.installedOnDeviceLanguages) useSystemAndDownload()
+                }
+                override fun onError(error: Int) { Log.i(TAG, "on-device speech check failed: $error"); useSystemAndDownload() }
+            })
+        }
+    }
 
-    fun listen() {
-        rec?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-        }) ?: onFail()
+    private fun useSystemAndDownload() {
+        if (system != null) rec = system
+        if (Build.VERSION.SDK_INT >= 33) runCatching { onDevice?.triggerModelDownload(intent()) }
+        Log.i(TAG, "speech engine: ${if (rec === system) "system (Google Speech Services)" else "on-device"}; on-device pack download requested")
+    }
+
+    private fun intent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Settings.voiceLanguage)
+        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        // Hints: give people time to start and to pause mid-sentence.
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+    }
+
+    val available get() = onDevice != null || system != null
+    @Volatile var listening = false
+        private set
+
+    /** First press: start. Press again while listening: "I'm done talking". */
+    fun press() {
+        val r = rec ?: return onFail("no recognizer")
+        if (listening) { r.stopListening(); return }
+        onDevice?.cancel(); system?.cancel() // never stack sessions
+        partial = null
+        listening = true
+        r.startListening(intent())
+    }
+
+    override fun onReadyForSpeech(p: Bundle?) = onReady()
+
+    override fun onPartialResults(b: Bundle?) {
+        b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.takeIf { it.isNotBlank() }?.let { partial = it }
     }
 
     override fun onResults(b: Bundle) {
-        b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let(onText) ?: onFail()
+        listening = false
+        retried = false
+        val all = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().filter { it.isNotBlank() }
+        val texts = all.ifEmpty { listOfNotNull(partial) }
+        if (texts.isEmpty()) onFail("empty result") else onText(texts)
     }
 
-    override fun onError(error: Int) = onFail()
-    override fun onReadyForSpeech(p: Bundle?) = Unit
+    override fun onError(error: Int) {
+        listening = false
+        val missingPack = error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+        if (missingPack && rec === onDevice && system != null && !retried) {
+            retried = true
+            useSystemAndDownload()
+            press() // same question, other engine: the ready buzz tells the user to speak again
+            return
+        }
+        retried = false
+        val p = partial
+        if (p != null) onText(listOf(p)) // heard something before the error: use it
+        else onFail(errorName(error))
+    }
+
     override fun onBeginningOfSpeech() = Unit
     override fun onRmsChanged(v: Float) = Unit
     override fun onBufferReceived(b: ByteArray?) = Unit
     override fun onEndOfSpeech() = Unit
-    override fun onPartialResults(b: Bundle?) = Unit
     override fun onEvent(t: Int, b: Bundle?) = Unit
+
+    private fun errorName(e: Int) = when (e) {
+        SpeechRecognizer.ERROR_NO_MATCH -> "no match"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no speech heard"
+        SpeechRecognizer.ERROR_AUDIO -> "audio error"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "recognizer busy"
+        SpeechRecognizer.ERROR_CLIENT -> "client error"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "no microphone permission"
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "language not supported"
+        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "language pack not installed"
+        else -> "error $e"
+    }
 }

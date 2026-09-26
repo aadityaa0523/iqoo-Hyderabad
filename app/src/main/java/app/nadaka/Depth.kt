@@ -80,6 +80,7 @@ class DepthAnalyzer {
     /** Metric scale: metres = scale / disparity. NaN until the floor has been seen. */
     var scale = Float.NaN
         private set
+    private val pending = ArrayList<Float>() // candidate floor scales before the ruler is trusted
     private var dropHits = 0
     private var overheadHits = 0
     private var grid: Array<FloatArray>? = null
@@ -95,8 +96,13 @@ class DepthAnalyzer {
 
     private fun median(v: List<Float>) = v.sorted().let { if (it.isEmpty()) Float.NaN else it[it.size / 2] }
 
-    fun analyze(g: Array<FloatArray>, pitchDeg: Float): Hazards {
+    /**
+     * [walking]: only then is the near ground assumed to be the floor you walk on, and only then are
+     * hazards reported. Distances (metresIn) still work when standing, using the trusted ruler.
+     */
+    fun analyze(g: Array<FloatArray>, pitchDeg: Float, walking: Boolean = true): Hazards {
         grid = g
+        if (!walking || pitchDeg !in Settings.hazardPitchMinDeg..Settings.hazardPitchMaxDeg) return Hazards()
         val pitch = Math.toRadians(pitchDeg.toDouble()).toFloat()
         val band = (DEPTH_COLS * 35 / 100) until (DEPTH_COLS * 65 / 100) // walking corridor
         val rowMed = FloatArray(DEPTH_ROWS) { r -> median(band.map { g[r][it] }) }
@@ -106,12 +112,25 @@ class DepthAnalyzer {
             val z = floorZ(r, pitch)
             if (z.isNaN() || z !in Settings.floorCalMinM..Settings.floorCalMaxM || rowMed[r] <= 0f) null else rowMed[r] * z
         }
+        var floorOk = false
         if (samples.size >= 3) {
             val m = median(samples)
             val flat = (samples.max() - samples.min()) / m < Settings.floorFlatness
-            if (flat) scale = if (scale.isNaN()) m else scale * 0.8f + m * 0.2f
+            if (flat && scale.isNaN()) {
+                // Trust the ruler only after several frames agree: one glance at a table top can't set it.
+                pending += m
+                if (pending.size > Settings.scaleLockFrames) pending.removeAt(0)
+                val med = median(pending)
+                if (pending.size == Settings.scaleLockFrames && pending.all { it / med in 0.8f..1.25f }) { scale = med; pending.clear() }
+            } else if (!scale.isNaN()) {
+                // The ground right under my feet (nearest rows) must match the trusted ruler: a table or bed
+                // top is much nearer than the floor and fails this. A drop further ahead doesn't matter here.
+                val near = median(samples.takeLast(3)) / scale
+                floorOk = near in (1 / Settings.scaleTolerance)..Settings.scaleTolerance
+                if (floorOk && flat) scale = scale * 0.9f + m * 0.1f
+            }
         }
-        if (scale.isNaN()) return Hazards() // honest: no ruler yet, no depth claims
+        if (scale.isNaN() || !floorOk) return Hazards() // honest: no trusted floor this frame, no depth claims
 
         // 2. Drop-off / floor obstacle: walk up the corridor from near to far.
         var drop: Float? = null
@@ -185,3 +204,15 @@ class DepthAnalyzer {
     fun latest() = grid
 }
 
+private val SURFACES = setOf("dining table", "bed", "couch", "bench", "desk", "chair", "toilet", "sink")
+
+/**
+ * Looking across a table or bed, its far edge looks exactly like a drop-off. If furniture covers the
+ * bottom-centre of the view, the "floor" there is its top: drop-off and floor-obstacle claims are dropped.
+ */
+fun withoutFurnitureFloor(hz: Hazards, tracks: List<Track>): Hazards {
+    val covered = tracks.any { t ->
+        t.label in SURFACES && t.box.bottom > 0.7f && t.box.left < 0.6f && t.box.right > 0.4f
+    }
+    return if (covered) hz.copy(dropAtM = null, floorObstacleAtM = null) else hz
+}

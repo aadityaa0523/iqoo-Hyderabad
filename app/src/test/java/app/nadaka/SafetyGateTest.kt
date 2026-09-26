@@ -48,4 +48,18 @@ class SafetyGateTest {
         m.record(1000 + Settings.hazardMemoryMs + 1, Hazards(), emptyList(), Health.OK)
         assertEquals(emptyList<String>(), m.recent())
     }
+
+    @Test fun commonRecognizerSlipsStillWork() {
+        assertEquals(Ask.DESCRIBE, intentOf("What's a head?"))
+        assertEquals(Ask.DESCRIBE, intentOf("watts ahead"))
+        assertEquals(Ask.READ, intentOf("red this"))
+        assertEquals(Ask.SAFETY, intentOf("is it save to cross"))
+        assertEquals(Ask.DESCRIBE, intentOf("what's near me"))
+    }
+
+    @Test fun nBestPicksAMeaningfulAlternativeAndSafetyAlwaysWins() {
+        assertEquals(Ask.DESCRIBE, bestIntent(listOf("hot tub", "what's ahead")).second)
+        assertEquals(Ask.SAFETY, bestIntent(listOf("what's ahead", "can I cross")).second)
+        assertEquals(Ask.HELP, bestIntent(listOf("banana")).second)
+    }
 }

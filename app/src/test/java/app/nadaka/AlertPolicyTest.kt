@@ -50,7 +50,7 @@ class AlertPolicyTest {
     @Test fun staticWithinFiveMetresOnce() {
         val p = AlertPolicy()
         assertEquals(emptyList<String>(), p.say(listOf(track(1, metres = 6f)), 0)) // beyond 5 m: silent
-        assertEquals(listOf("chair, 3 metres, 12 o'clock."), p.say(listOf(track(2, metres = 3.1f)), 0))
+        assertEquals(listOf("Chair, 3 metres, 12 o'clock."), p.say(listOf(track(2, metres = 3.1f)), 0))
         assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 3f)), 10_000)) // already told
         assertEquals(emptyList<String>(), p.say(listOf(track(3, cx = 0.95f, metres = 1.2f)), 20_000)) // half out of frame
         assertEquals(listOf("chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(track(4, metres = 1.2f)), 0))
@@ -66,10 +66,23 @@ class AlertPolicyTest {
         assertEquals(1, p.say(listOf(walker(6f)), Settings.movingRepeatMs).size)
     }
 
-    @Test fun standingOnlyCaresAboutWhatIsAtMe() {
+    @Test fun standingTellsStaticThingsOnceButNeverNags() {
         val p = AlertPolicy()
-        assertEquals(0, p.decide(listOf(track(1, metres = 1.3f)), Health.OK, 0, activity = Activity.STILL).size)
-        assertEquals(1, p.decide(listOf(track(2, "person", approaching = true)), Health.OK, 0, activity = Activity.STILL).size)
+        val chair = listOf(track(1, metres = 1.3f))
+        assertEquals(listOf("Chair, 1.5 metres, 12 o'clock."), p.decide(chair, Health.OK, 0, activity = Activity.STILL).map { it.text })
+        assertEquals(0, p.decide(chair, Health.OK, 10_000, activity = Activity.STILL).size) // no "close" repeats when standing
+        assertEquals(1, p.decide(listOf(track(2, "person", approaching = true)), Health.OK, 20_000, activity = Activity.STILL).size)
+    }
+
+    @Test fun staticAwarenessIsSpokenEvenInVibrationMode() {
+        val a = AlertPolicy().decide(listOf(track(1, metres = 3.1f)), Health.OK, 0).single()
+        assertEquals("Chair, 3 metres, 12 o'clock.", a.short) // spoken, not just felt
+    }
+
+    @Test fun reTrackedObjectIsNotAnnouncedAgain() {
+        val p = AlertPolicy()
+        assertEquals(1, p.say(listOf(track(1, metres = 3f)), 0).size)
+        assertEquals(0, p.say(listOf(track(7, metres = 3f)), 5_000).size) // same chair, new track ID after a flicker
     }
 
     @Test fun vehicleSilencesPhantomHazards() {
@@ -80,7 +93,7 @@ class AlertPolicyTest {
     }
 
     @Test fun distanceIsSpoken() = chatty {
-        assertEquals(listOf("chair, 3 metres, 12 o'clock."), AlertPolicy().say(listOf(track(1, metres = 3.1f)), 0))
+        assertEquals(listOf("Chair, 3 metres, 12 o'clock."), AlertPolicy().say(listOf(track(1, metres = 3.1f)), 0))
         assertEquals("very close", metres(0.4f))
         assertEquals("1 metre", metres(1.1f))
         assertEquals("2.5 metres", metres(2.4f))

@@ -45,7 +45,7 @@ const val TAG = "NADAKA"
 
 /** Every tunable lives here; the caregiver screen will edit these. */
 object Settings {
-    var minScore = 0.5f
+    var minScore = 0.45f
     var speechCooldownMs = 2000L
     var readTimeoutMs = 12000L
     var minTextArea = 0.04f // text must cover this fraction of the frame, else "Move closer"
@@ -92,11 +92,12 @@ object Settings {
     var heatCalmMs = 20000L // calm needed before stepping down a tier
 
     // Voice questions (Voice.kt)
+    var voiceLanguage = "en-US" // the offline speech pack installed on the loaner phone
     var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
 
     // Confidence (Tracker.kt): unsure objects are not announced unless approaching or touching.
     var sureHits = 5
-    var sureScore = 0.5f
+    var sureScore = 0.45f
     var agreeRatio = 1.6f // depth vs size distance may differ by up to 60%
     var movingMps = 0.6f // below this, box jitter, not motion
 
@@ -104,7 +105,7 @@ object Settings {
     var hapticsFirst = true // vibration carries routine alerts; speech only for "Stop. Drop." etc. (docs/haptics.md)
     var pulseMaxM = 2.5f // proximity ticks start when something in the path is this close
     var pulseProgressM = 0.3f // the gap must shrink by this much to count as "getting closer"
-    var pulseStaleMs = 4000L // no progress for this long -> stop ticking (except at touching range)
+    var pulseStaleMs = 1000L // no progress for this long -> stop ticking (except at touching range)
     var tickMs = 45L // long enough to feel on the chest
     var hapticGain = 1.0f // one knob for overall strength if the user finds it weak/strong
     var chatty = false // true = static objects at any distance, not just within staticRangeM
@@ -134,10 +135,15 @@ object Settings {
     var floorFlatness = 0.3f
     var dropMinM = 0.7f
     var dropMaxM = 3.5f
-    var dropRatio = 0.3f // floor >30% farther than a flat floor would be = it drops away
+    var dropRatio = 0.45f // floor >45% farther than a flat floor would be = it drops away
     var obstacleRatio = 0.25f
-    var hazardRows = 2
-    var depthHits = 3 // depth frames in a row before a drop/overhang is announced
+    var hazardRows = 3
+    var depthHits = 4 // depth frames in a row before a drop/overhang is announced
+    var scaleLockFrames = 5 // consistent floor frames before the depth ruler is trusted
+    var scaleTolerance = 1.6f // a "floor" whose scale differs more than this is a table top, not the floor
+    var hazardPitchMinDeg = -5f // depth hazards only with a chest-worn camera looking ahead / slightly down
+    var hazardPitchMaxDeg = 35f
+    var staticRepeatMs = 15000L // same label, same direction: don't re-announce within this
     var headMinM = 1.2f
     var headMaxM = 2.1f
     var overheadMaxM = 2.0f
@@ -202,7 +208,11 @@ class MainActivity : ComponentActivity() {
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
         else registerForActivityResult(RequestMultiplePermissions()) { if (it[CAMERA] == true) startCamera() }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
-        voice = VoiceInput(this, ::answer) { feedback.say("Sorry, I didn't catch that.") }
+        voice = VoiceInput(this, onReady = { feedback.readyCue() }, onText = ::answer) { why ->
+            Log.i(TAG, "voice failed: $why")
+            feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
+                         else "Voice problem: $why.")
+        }
     }
 
     override fun onResume() { super.onResume(); ego.start() }
@@ -244,7 +254,7 @@ class MainActivity : ComponentActivity() {
             if (egoLog.recording) analysisThread.execute { // label toggle while recording training data
                 egoLog.label = 1 - egoLog.label
                 feedback.say(if (egoLog.label == 1) "Approaching." else "Clear.")
-            } else if (voice.available) { feedback.buzz(); voice.listen() } // ask a question
+            } else if (voice.available) { if (event.repeatCount == 0) { feedback.hush(); voice.press() } } // ask; press again = done
             else feedback.say("Voice questions are not available on this phone.")
             return true
         }
@@ -265,9 +275,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Voice question -> deterministic answer. Safety questions never reach anything that could say yes. */
-    private fun answer(text: String) {
-        Log.i(TAG, "asked: $text")
-        val reply = when (intentOf(text)) {
+    private fun answer(alternatives: List<String>) {
+        val (text, ask) = bestIntent(alternatives)
+        Log.i(TAG, "asked: $alternatives -> $ask")
+        val reply = when (ask) {
             Ask.SAFETY -> Answers.safety(memory.recent())
             Ask.DESCRIBE -> Answers.describe(latestTracks, latestHazards)
             Ask.READ -> { analysisThread.execute { if (!reading) { reader.start(); reading = true } }; "Reading. Hold it in front of the camera." }
@@ -276,9 +287,9 @@ class MainActivity : ComponentActivity() {
             Ask.LEARN -> { feedback.lesson(); return }
             Ask.CHATTY -> { Settings.chatty = true; "OK, I'll tell you more." }
             Ask.QUIET -> { Settings.chatty = false; "OK, only important things." }
-            Ask.HELP -> HELP_TEXT
+            Ask.HELP -> if (text.isBlank()) HELP_TEXT else "I heard: $text. $HELP_TEXT"
         }
-        feedback.say(reply, strong = intentOf(text) == Ask.SAFETY)
+        feedback.say(reply, strong = ask == Ask.SAFETY)
         said = reply
     }
 
@@ -334,7 +345,9 @@ class MainActivity : ComponentActivity() {
         if (!depthOn) hazards = Hazards()
         if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
-            hazards = depthAnalyzer.analyze(depth.run(frame), pitch)
+            // Drop-offs only matter while walking; at a desk the table top would be mistaken for the floor.
+            val walking = activity.current == Activity.WALKING
+            hazards = withoutFurnitureFloor(depthAnalyzer.analyze(depth.run(frame), pitch, walking), tracks)
             depthMs = SystemClock.elapsedRealtime() - d0
         }
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
@@ -343,10 +356,10 @@ class MainActivity : ComponentActivity() {
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
         latestHazards = hazards
-        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() && !voice.listening }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
         // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
-        if (activity.current == Activity.WALKING && !policy.blind) { // ticks only while walking
+        if (activity.current == Activity.WALKING && !policy.blind && !voice.listening) { // ticks only while walking
             val inPathM = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() && inPath(it) && (it.sure || it.metres < Settings.veryCloseM) }
                 .minOfOrNull { it.metres }
             feedback.haptics.proximity(listOfNotNull(inPathM, hazards.floorObstacleAtM).minOrNull() ?: Float.NaN)
@@ -385,6 +398,12 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     }
 
     fun buzz() = vibrator.vibrate(side)
+
+    /** Stop talking before listening: the recognizer must not hear us. */
+    fun hush() = tts.stop()
+
+    /** The microphone is open now: a crisp double tap (vibration, so it doesn't pollute the audio). */
+    fun readyCue() = vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), intArrayOf(0, 255, 0, 255), -1))
 
     fun say(text: String, strong: Boolean = false) {
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text)

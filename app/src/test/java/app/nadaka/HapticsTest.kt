@@ -28,7 +28,7 @@ class HapticsTest {
         // Walk from 2.4 m to 1.2 m over 3 s: ticks, getting faster.
         for (i in 0..60) if (p.update(i * 50L, 2.4f - i * 0.02f) != null) ticks++
         assertTrue("ticks while approaching: $ticks", ticks >= 4)
-        // Stand at 1.2 m for 10 s (desk, wall): ticking must stop after the stale window.
+        // Stand at 1.2 m for 10 s (desk, wall): ticking must stop 1 s after progress stops.
         var late = 0
         for (i in 61..260) if (p.update(i * 50L, 1.2f) != null && i * 50L > 3000 + Settings.pulseStaleMs) late++
         assertEquals(0, late)
