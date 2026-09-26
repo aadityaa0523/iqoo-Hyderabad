@@ -92,7 +92,13 @@ object Settings {
     var heatCalmMs = 20000L // calm needed before stepping down a tier
 
     // Voice questions (Voice.kt)
-    var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
+    var hazardMemoryMs = 1500L
+
+    // Confidence (Tracker.kt): what makes an object SURE rather than "maybe".
+    var sureHits = 5
+    var sureScore = 0.5f
+    var agreeRatio = 1.6f // depth vs size distance may differ by up to 60%
+    var movingMps = 0.4f // a hazard seen this recently is still reported when asked "is it safe?"
 
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
     var chatty = false

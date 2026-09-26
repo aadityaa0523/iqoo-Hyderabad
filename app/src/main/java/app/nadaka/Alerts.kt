@@ -60,6 +60,9 @@ data class Hazards(
     val floorObstacleAtM: Float? = null,
 )
 
+/** "chair", or "maybe chair" when the evidence is shaky. */
+private fun name(t: Track) = if (t.sure) t.label else "maybe ${t.label}"
+
 private fun inPath(t: Track) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < Settings.pathHalfDeg
 
 /** "2.5 metres", "1 metre", "very close"; "" when unknown. */
@@ -134,18 +137,19 @@ class AlertPolicy {
         val coming = stable.filter { it.approaching }.minByOrNull { it.ttc }
         if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
             lastApproachMs = now
-            out += Alert(phrase("${coming.label} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH)
+            out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH)
         }
 
         // Close by: repeats while close, even if already announced (it is a collision risk).
         // Only things in my path, or practically touching me. A chair 1 m to the side is not news.
         val close = stable.filter {
-            it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM)
+            it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM) &&
+                (!it.edge || it.metres < Settings.veryCloseM) // half-visible edge objects only when practically touching
         }.minByOrNull { it.metres }
         if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
             lastCloseMs = now
             spokenHeight[close.id] = close.box.height()
-            out += Alert(phrase("${close.label} close", metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
+            out += Alert(phrase("${name(close)} close", metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
         } else if (close == null && coming == null && walking) {
             hz.floorObstacleAtM?.takeIf { it < Settings.closeM && now - lastCloseMs >= Settings.closeRepeatMs }?.let {
                 lastCloseMs = now
@@ -161,7 +165,7 @@ class AlertPolicy {
             lastCrowdMs = now; lastInfoMs = now
             return listOf(Alert("Crowd ahead.", Buzz.AHEAD))
         }
-        val t = stable.filter { !(crowd && it.label == "person") }.maxByOrNull { it.box.height() } ?: return out
+        val t = stable.filter { it.sure && !(crowd && it.label == "person") }.maxByOrNull { it.box.height() } ?: return out
         val said = spokenHeight[t.id]
         if (said != null && t.box.height() < said * Settings.habituationGrowth) return out
         spokenHeight[t.id] = t.box.height()

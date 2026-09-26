@@ -166,11 +166,17 @@ class DepthAnalyzer {
     fun metresIn(b: Box): Float {
         val g = grid ?: return Float.NaN
         if (scale.isNaN()) return Float.NaN
-        val r0 = (b.top * DEPTH_ROWS).toInt().coerceIn(0, DEPTH_ROWS - 1); val r1 = (b.bottom * DEPTH_ROWS).toInt().coerceIn(r0, DEPTH_ROWS - 1)
-        val c0 = (b.left * DEPTH_COLS).toInt().coerceIn(0, DEPTH_COLS - 1); val c1 = (b.right * DEPTH_COLS).toInt().coerceIn(c0, DEPTH_COLS - 1)
+        // Centre half of the box, lower-middle part: that is the front object when boxes overlap,
+        // and it avoids the background showing around the object's outline.
+        val bh = b.bottom - b.top
+        val bw = b.right - b.left
+        val r0 = ((b.top + bh * 0.4f) * DEPTH_ROWS).toInt().coerceIn(0, DEPTH_ROWS - 1)
+        val r1 = ((b.top + bh * 0.9f) * DEPTH_ROWS).toInt().coerceIn(r0, DEPTH_ROWS - 1)
+        val c0 = ((b.left + bw * 0.25f) * DEPTH_COLS).toInt().coerceIn(0, DEPTH_COLS - 1)
+        val c1 = ((b.right - bw * 0.25f) * DEPTH_COLS).toInt().coerceIn(c0, DEPTH_COLS - 1)
         val v = ArrayList<Float>()
         for (r in r0..r1) for (c in c0..c1) if (g[r][c] > 0f) v += g[r][c]
-        // Top quartile of disparity = the object's near surface, not the background around it.
+        // Top quartile of disparity = the nearest surface in that patch.
         val d = v.sorted().let { if (it.isEmpty()) return Float.NaN else it[it.size * 3 / 4] }
         return scale / d
     }

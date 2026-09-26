@@ -43,6 +43,7 @@ class Hud(ctx: Context) : View(ctx) {
     private val red = 0xFFFF453A.toInt()
     private val orange = 0xFFFF9F0A.toInt()
     private val green = 0xFF32D74B.toInt()
+    private val blue = 0xFF64D2FF.toInt() // unsure
     private val card = 0xD910151C.toInt()
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -79,14 +80,16 @@ class Hud(ctx: Context) : View(ctx) {
     private fun drawTrack(c: Canvas, t: Track, ox: Float, oy: Float, iw: Float, ih: Float) {
         val r = RectF(ox + t.box.left * iw, oy + t.box.top * ih, ox + t.box.right * iw, oy + t.box.bottom * ih)
         val close = t.metres < Settings.closeM
-        val col = when { t.approaching -> red; close -> orange; else -> amber }
+        val col = when { t.approaching -> red; close -> orange; !t.sure -> blue; else -> amber }
         stroke.color = col
-        stroke.strokeWidth = (if (t.approaching) 4f else 2.5f) * dp
+        stroke.strokeWidth = (if (t.approaching) 4f else if (t.sure) 2.5f else 1.5f) * dp
         c.drawRoundRect(r, 10 * dp, 10 * dp, stroke)
 
         val label = buildString {
             append(t.label)
+            if (!t.sure) append("?")
             if (!t.metres.isNaN()) append("  %.1f m".format(t.metres))
+            if (t.moving && !t.approaching) append("  moving")
             if (t.approaching) append("  ▲ %.1fs".format(t.ttc))
         }
         text.textSize = 13 * dp

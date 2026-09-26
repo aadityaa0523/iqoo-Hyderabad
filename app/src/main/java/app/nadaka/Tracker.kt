@@ -48,6 +48,21 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
     var objSpeed = 0f          // m/s toward me after subtracting my own walking
     var approaching = false
     var hits = 0               // frames this object has been matched; flicker guard
+    var score = 0f             // smoothed detector confidence
+    var lateralMps = 0f        // sideways speed after removing my own turning
+    val moving get() = objSpeed > Settings.movingMps || kotlin.math.abs(lateralMps) > Settings.movingMps
+
+    /** Half-visible at the left/right edge: direction and size are unreliable. */
+    val edge get() = box.left <= 0.02f || box.right >= 0.98f
+
+    /** Depth-model distance and object-size distance roughly agree (a reflective surface breaks depth). */
+    val consistent get() = depthM.isNaN() || distance.isNaN() || max(depthM, distance) / min(depthM, distance) < Settings.agreeRatio
+
+    /**
+     * SURE: seen steadily, confident, fully in view, depth and size agree. UNSURE objects are only
+     * spoken when they matter (close or approaching) and then as "maybe ...".
+     */
+    val sure get() = hits >= Settings.sureHits && score >= Settings.sureScore && !edge && consistent
     var features = FloatArray(0)
 
     val bearing get() = (box.centerX() - 0.5f) * Settings.hfovRad
@@ -79,6 +94,11 @@ class Tracker(private val model: EgoModel? = null) {
                 .maxByOrNull { iou(it.box.shifted(shift), d.box) }
                 ?.takeIf { iou(it.box.shifted(shift), d.box) >= Settings.trackIou }
             val t = match?.also { free.remove(it) } ?: Track(nextId++, d.label, d.box, now)
+            if (match != null && dt > 0) {
+                val lateral = (d.box.centerX() - match.box.shifted(shift).centerX()) * Settings.hfovRad * t.metres / dt
+                if (!lateral.isNaN()) t.lateralMps = 0.7f * t.lateralMps + 0.3f * lateral
+            }
+            t.score = if (t.hits == 0) d.score else 0.7f * t.score + 0.3f * d.score
             t.box = d.box
             t.seenMs = now
             t.hits++

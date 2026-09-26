@@ -9,11 +9,26 @@ class AlertPolicyTest {
         id: Int, label: String = "chair", h: Float = 0.3f, cx: Float = 0.5f, hits: Int = 5,
         approaching: Boolean = false, metres: Float = 3f,
     ) = Track(id, label, Box(cx - 0.05f, 0.9f - h, cx + 0.05f, 0.9f), 0L).also {
-        it.hits = hits; it.approaching = approaching; it.ttc = 2f; it.distance = metres
+        it.hits = hits; it.approaching = approaching; it.ttc = 2f; it.distance = metres; it.score = 0.8f
     }
 
     private fun AlertPolicy.say(tracks: List<Track>, now: Long, health: Health = Health.OK, hz: Hazards = Hazards()) =
         decide(tracks, health, now, hz).map { it.text }
+
+    @Test fun shakyObjectIsSaidAsMaybe() {
+        val t = track(1, metres = 1.2f).also { it.score = 0.3f }
+        assertEquals(listOf("maybe chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(t), 0))
+    }
+
+    @Test fun halfVisibleEdgeObjectOnlyWhenTouching() {
+        val edge = Track(1, "chair", Box(0.9f, 0.4f, 1f, 0.9f), 0).also { it.hits = 9; it.score = 0.9f; it.distance = 1.2f }
+        assertEquals(0, AlertPolicy().say(listOf(edge), 0).size)
+    }
+
+    @Test fun depthAndSizeDisagreeingMakesItUnsure() {
+        val t = track(1, metres = 1.2f).also { it.depthM = 4f } // mirror or glass
+        assertTrue(!t.sure)
+    }
 
     @Test fun oneFrameFlickerIsIgnored() {
         assertEquals(emptyList<String>(), AlertPolicy().say(listOf(track(1, hits = 1)), 0))
