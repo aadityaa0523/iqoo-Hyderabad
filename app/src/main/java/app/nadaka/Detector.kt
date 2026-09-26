@@ -4,12 +4,14 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.util.Log
+import com.qualcomm.qti.QnnDelegate
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
 /** box is normalised 0..1 in the (rotated, upright) frame. */
@@ -29,14 +31,7 @@ class Detector(ctx: Context) {
         val fd = ctx.assets.openFd("detect.tflite")
         val model = FileInputStream(fd.fileDescriptor).channel
             .map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-        // ponytail: GPU then CPU; QNN (NPU) delegate slots in first once qnn-litert-delegate is added.
-        val (interp, name) = try {
-            check(CompatibilityList().isDelegateSupportedOnThisDevice) { "GPU not supported" }
-            Interpreter(model, Interpreter.Options().addDelegate(GpuDelegate())) to "GPU"
-        } catch (e: Throwable) {
-            Log.w(TAG, "GPU delegate unavailable, using CPU: $e")
-            Interpreter(model, Interpreter.Options().setNumThreads(4)) to "CPU"
-        }
+        val (interp, name) = open(ctx, model)
         interpreter = interp
         backend = name
         interpreter.allocateTensors()
@@ -77,6 +72,30 @@ class Detector(ctx: Context) {
                 )
             }
             .filter { it.label != "???" }
+    }
+
+    /** Hexagon NPU (QNN HTP), then GPU, then CPU. The post-process op stays on CPU either way. */
+    private fun open(ctx: Context, model: MappedByteBuffer): Pair<Interpreter, String> {
+        try {
+            check(QnnDelegate.checkCapability(QnnDelegate.Capability.HTP_RUNTIME_QUANTIZED)) { "no HTP" }
+            val qnn = QnnDelegate(QnnDelegate.Options().apply {
+                setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
+                setSkelLibraryDir(ctx.applicationInfo.nativeLibraryDir)
+                setCacheDir(ctx.cacheDir.absolutePath) // compiled graph cached: faster next launch
+                // Sustained, not burst: a walking aid runs for hours, so avoid thermal throttling.
+                setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE)
+            })
+            return Interpreter(model, Interpreter.Options().addDelegate(qnn)) to "NPU"
+        } catch (e: Throwable) {
+            Log.w(TAG, "NPU unavailable: $e")
+        }
+        try {
+            check(CompatibilityList().isDelegateSupportedOnThisDevice) { "GPU not supported" }
+            return Interpreter(model, Interpreter.Options().addDelegate(GpuDelegate())) to "GPU"
+        } catch (e: Throwable) {
+            Log.w(TAG, "GPU unavailable: $e")
+        }
+        return Interpreter(model, Interpreter.Options().setNumThreads(4)) to "CPU"
     }
 
     private fun ByteBuffer.floats() = FloatArray(capacity() / 4).also { rewind(); asFloatBuffer().get(it) }

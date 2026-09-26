@@ -27,6 +27,16 @@ android {
     }
 
     androidResources { noCompress += "tflite" }
+
+    // QNN needs its Hexagon skel libs extracted to nativeLibraryDir.
+    // Drop QNN pieces we don't use: DSP/GPU backends and pre-8-Gen-3 Hexagon versions.
+    // ponytail: once the loaner's chip is known (logcat "NPU"), keep only its HtpV*Skel/Stub.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += listOf("QnnDsp*", "QnnGpu*", "QnnHtpV68*", "QnnHtpV69*", "QnnHtpV73*").map { "lib/arm64-v8a/lib$it.so" }
+        }
+    }
 }
 
 kotlin {
@@ -42,5 +52,8 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
     implementation("com.google.mlkit:text-recognition:16.0.1") // bundled Latin OCR, works offline
+    val qnn = "2.50.0" // Qualcomm Hexagon NPU delegate for LiteRT
+    implementation("com.qualcomm.qti:qnn-litert-delegate:$qnn")
+    implementation("com.qualcomm.qti:qnn-runtime:$qnn")
     testImplementation("junit:junit:4.13.2")
 }
