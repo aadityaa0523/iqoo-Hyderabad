@@ -79,6 +79,7 @@ data class Hazards(
     val overheadAtM: Float? = null,
     val overheadBearing: Float = 0f,
     val floorObstacleAtM: Float? = null,
+    val waistAtM: Float? = null, // table top, counter, railing: 0.45-1.2 m high, often with open space below
 )
 
 private fun name(t: Track) = t.label
@@ -172,7 +173,7 @@ class AlertPolicy {
         val close = stable.filter {
             it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM) &&
                 // Unsure or half-visible objects only when practically touching: silence beats a wrong alert.
-                ((it.sure && !it.edge) || it.metres < Settings.veryCloseM)
+                (it.sure || it.metres < Settings.veryCloseM)
         }.minByOrNull { urgency(it) }
         if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
             lastCloseMs = now
@@ -184,6 +185,11 @@ class AlertPolicy {
                 lastCloseMs = now
                 out += Alert(phrase("Obstacle ahead", metres(it)), Buzz.AHEAD) // something YOLO can't name (wall, pole)
             }
+        }
+        // Waist height (table top, counter): walking or standing, the cane sweeps under it.
+        if (close == null && coming == null) hz.waistAtM?.takeIf { it < closeRange && now - lastCloseMs >= Settings.closeRepeatMs }?.let {
+            lastCloseMs = now
+            out += Alert(phrase("Obstacle at waist height", metres(it)), Buzz.AHEAD, null, "Waist height.")
         }
         if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
 

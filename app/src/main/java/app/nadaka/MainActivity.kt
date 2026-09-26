@@ -161,6 +161,39 @@ object Settings {
     var fpsSitting = 3
     var fpsVehicle = 2
     var cameraHeightM = 1.3f
+    // Calibration (Calibration.kt)
+    var calPitchMinDeg = 8f     // floor 0.8-2 m ahead must be in view for the ruler to learn
+    var calPitchMaxDeg = 32f
+    var calSteadyMs = 2000L
+    var calCoachMs = 3000L
+    // Fall detection (Fall.kt)
+    var fallFreeG = 0.45f        // below this = falling (weightless)
+    var fallFreeMs = 40L         // for at least this long before tracking starts
+    var fallMinDropM = 0.5f      // only falls of 50 cm or more (a jolt or a short drop is not a fall)
+    var fallImpactG = 2.3f       // then a hit above this
+    var fallImpactWindowMs = 1200L
+    var fallSettleMs = 800L      // ignore the bounce right after the hit
+    var fallStillMs = 1500L      // then lying still for this long
+    var fallStillG = 0.25f
+    var fallTurnDeg = 45f        // and the phone ended up turned this much
+    var fallCancelMs = 7000L
+    // Walk straight (Straight.kt)
+    var veerDeg = 10f
+    var veerHoldMs = 1000L
+    var veerRepeatMs = 4000L
+    var veerTurnDeg = 60f
+    var veerTurnMs = 2000L
+    var veerMaxMs = 90_000L
+    // Bus route numbers (Bus.kt)
+    var busTryMs = 700L
+    var busMinBoxH = 0.12f  // bus must fill this much of the frame height (close enough to read)
+    var busVotes = 2
+    var busMaxTries = 6
+    var stairsRepeatMs = 7000L     // "press a volume key if you're OK" window before the siren
+    var calStepTimeoutMs = 25_000L
+    var calWalkTimeoutMs = 30_000L  // per walk, counted from its first volume-down press
+    var calIdleTimeoutMs = 120_000L // waiting for a press before giving up
+    var calStepLatencyMs = 700L     // the step sensor reports each step slightly late
     var floorCalMinM = 0.8f
     var floorCalMaxM = 2.0f
     var floorFlatness = 0.3f
@@ -179,6 +212,8 @@ object Settings {
     var hazardPitchMinDeg = -5f // depth hazards only with a chest-worn camera looking ahead / slightly down
     var hazardPitchMaxDeg = 35f
     var staticRepeatMs = 15000L // same label, same direction: don't re-announce within this
+    var waistMinM = 0.45f // waist-height obstacles (tables, counters)
+    var waistMaxM = 1.2f
     var headMinM = 1.2f
     var headMaxM = 2.1f
     var overheadMaxM = 2.0f
@@ -215,11 +250,35 @@ class MainActivity : ComponentActivity() {
     }
     private var dropOut: app.nadaka.drop.DropOutput? = null
     private var dropSaidMs = -1_000_000L
+    private var stairsSaidMs = -1_000_000L
     private val baroListener = object : android.hardware.SensorEventListener {
         override fun onSensorChanged(e: android.hardware.SensorEvent) = drop.barometer.update(e.values[0])
         override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) = Unit
     }
     private var depthFrames = 0
+    @Volatile private var calibration: Calibration? = null
+    @Volatile private var straight: StraightLine? = null
+    private val bus = BusReader() // analysis thread only
+    private val busOcr by lazy { com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS) }
+    private val sms by lazy { EmergencySms(this) }
+    private val pickContact = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { r ->
+        val uri = r.data?.data ?: return@registerForActivityResult
+        contentResolver.query(uri, arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val contact = Contact(c.getString(0) ?: "Contact", c.getString(1) ?: return@use)
+                Prefs.contacts = (Prefs.contacts + contact).distinctBy { it.number }.take(2)
+                Prefs.save(this)
+                feedback.say("${contact.name} added as an emergency contact.")
+                screen.restyle()
+            }
+        }
+        // Texting and location are only asked for once someone is actually set up to receive them.
+        smsPermissions.launch(arrayOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION))
+    }
+    private val smsPermissions = registerForActivityResult(RequestMultiplePermissions()) { }
+    private var calRulerFresh = false // the ruler was reset at the first walk press
     private var said = "" // last sentence spoken, shown as the caption
     private var saidLevel: Buzz? = null
     private val activity = ActivityDetector() // analysis thread only
@@ -271,7 +330,12 @@ class MainActivity : ComponentActivity() {
             displayChanged = ::applyDisplay,
             recordToggle = ::toggleRecording,
             openBenchmark = { startActivity(Intent(this, BenchActivity::class.java)) },
+            calibrate = ::startCalibration,
+            addContact = { pickContact.launch(Intent(Intent.ACTION_PICK, android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI)) },
+            removeContact = { i -> Prefs.contacts = Prefs.contacts.filterIndexed { k, _ -> k != i }; Prefs.save(this) },
+            testSms = { feedback.say(sms.alert("", test = true)) },
         ))
+        if (Prefs.calibrated) depthAnalyzer.restore(Prefs.depthScale)
         setContentView(screen.root)
         applyDisplay()
         if (!Prefs.wizardDone) screen.root.post { screen.settings.show(wizard = true) }
@@ -279,7 +343,7 @@ class MainActivity : ComponentActivity() {
             override fun handleOnBackPressed() { if (!screen.back()) finish() }
         })
         motionMissing = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) == null
-        ego = EgoMotion(this)
+        ego = EgoMotion(this).also { it.onFall = { runOnUiThread(::fallDetected) } }
         egoLog = EgoLog(this)
 
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
@@ -293,10 +357,69 @@ class MainActivity : ComponentActivity() {
         feedback.listening = { voice.listening }
         voice = VoiceInput(this, onReady = { feedback.readyCue() }, onText = ::answer) { why ->
             Log.i(TAG, "voice failed: $why")
+            calibration?.takeIf { it.step == Calibration.Step.HEIGHT }?.let { c ->
+                val next = c.noAnswer(SystemClock.elapsedRealtime()); feedback.answer(next); said = next
+                return@VoiceInput
+            }
             feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
                          else "Voice problem: $why.")
         }
     }
+
+    /**
+     * One button (Settings > Calibrate, TalkBack-labelled): voice-guided height, mounting and a ten-step walk.
+     * Also reads this phone's real lens field of view. Results are saved (Prefs) and restored at launch.
+     */
+    private fun startCalibration() {
+        lensFov()?.let { (h, v) -> Settings.hfovDeg = h; Settings.vfovDeg = v; Log.i(TAG, "calibration: lens FOV %.1f x %.1f deg".format(h, v)) }
+        val c = Calibration(SystemClock.elapsedRealtime())
+        calRulerFresh = false
+        calibration = c
+        feedback.answer(Calibration.HEIGHT_PROMPT); said = Calibration.HEIGHT_PROMPT
+        // Open the mic by itself once the prompt has been read out: the only action is to speak.
+        main.postDelayed({ if (calibration === c && c.step == Calibration.Step.HEIGHT) {
+            if (voice.available && !voice.listening) { feedback.hush(); voice.press() } // buzz, then the user speaks
+            else { val next = c.noAnswer(SystemClock.elapsedRealtime()); feedback.answer(next); said = next }
+        } }, 9000)
+    }
+
+    /** Analysis thread: advance calibration by one frame; save when done. */
+    private fun calibrationFrame(c: Calibration, now: Long, pitch: Float) {
+        if (c.consumeRulerReset()) {
+            calRulerFresh = true
+            depthAnalyzer.relearn() // learn the ruler fresh, at this height and this mounting
+        }
+        if (c.walking) activity.force(Activity.WALKING, now)
+        c.frame(now, pitch, ego.stepCount, calRulerFresh && !depthAnalyzer.scale.isNaN())?.let { runOnUiThread { feedback.answer(it) }; said = it }
+        if (!c.finished) return
+        if (c.step == Calibration.Step.DONE) {
+            Prefs.calibrated = true
+            Prefs.calibratedAtMs = System.currentTimeMillis()
+            Prefs.bodyHeightM = c.heightM
+            Prefs.cameraHeightM = Settings.cameraHeightM
+            Prefs.depthScale = depthAnalyzer.scale
+            Prefs.hfovDeg = Settings.hfovDeg; Prefs.vfovDeg = Settings.vfovDeg
+            // Metres per *sensed* step: stride from height, corrected by how many steps the sensor misses or adds.
+            val stride = if (c.heightM.isNaN()) Settings.strideM else Calibration.strideFor(c.heightM)
+            if (!c.stepFactor.isNaN()) { Settings.strideM = stride * c.stepFactor; Prefs.strideM = Settings.strideM }
+            Log.i(TAG, "calibration: step factor %.2f, %.2f s/step, stride %.2f m".format(c.stepFactor, c.secondsPerStep, Settings.strideM))
+            Prefs.save(this)
+            Log.i(TAG, "calibration: done, camera %.2f m, ruler %.3f".format(Settings.cameraHeightM, depthAnalyzer.scale))
+        } else Log.i(TAG, "calibration: failed at the walk")
+        calibration = null
+    }
+
+    /** Portrait field of view of the main back camera, from its focal length and sensor size. */
+    private fun lensFov(): Pair<Float, Float>? = runCatching {
+        val cm = getSystemService(android.hardware.camera2.CameraManager::class.java)
+        val ch = cm.cameraIdList.map { cm.getCameraCharacteristics(it) }.first {
+            it.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK
+        }
+        val f = ch.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)!![0]
+        val s = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)!!
+        fun deg(mm: Float) = Math.toDegrees(2 * kotlin.math.atan(mm / (2 * f)).toDouble()).toFloat()
+        (deg(s.height) to deg(s.width)).takeIf { (h, v) -> h in 35f..85f && v in 45f..100f } // portrait: width uses sensor height
+    }.getOrNull()
 
     /** Camera filter changed (the screen restyles itself). */
     private fun applyDisplay() = applyCameraView(preview)
@@ -394,13 +517,93 @@ class MainActivity : ComponentActivity() {
         keysDown -= keyCode
         main.removeCallbacks(emergencyHold)
         if (chord) { if (keysDown.isEmpty()) chord = false; return true }
+        if (fallPending) { cancelFall(); return true }
         if (emergency.active) { emergency.stop(); feedback.say("Alarm stopped."); return true }
         singlePress(keyCode, event)
         return true
     }
 
+    /** Walk straight: drift cues as vibration (one long = turn right, two short = turn left) plus a few words. */
+    private fun walkStraight(now: Long) {
+        val s = straight ?: return
+        val v = s.update(now, ego.headingDeg) ?: return
+        if (v == Veer.DONE) straight = null
+        val tacton = when (v) { Veer.DRIFT_LEFT -> Tacton.VEER_LEFT; Veer.DRIFT_RIGHT -> Tacton.VEER_RIGHT; else -> null }
+        val words = StraightLine.words(v)
+        runOnUiThread { feedback.play(listOf(Alert(words, Buzz.AHEAD, tacton, words))) }
+        said = words
+    }
+
+    /**
+     * Bus route number: crop the board from the full-resolution preview, read it on-device (ML Kit), vote over
+     * tries; if it won't read, ask Qwen once. Announced once per bus.
+     */
+    private fun readBus(now: Long, tracks: List<Track>) {
+        val t = bus.due(now, tracks) ?: return
+        val area = BusReader.boardArea(t)
+        val img = BusReader.crop(previewFrame() ?: latestFrame ?: return, area) ?: return
+        val text = runCatching { com.google.android.gms.tasks.Tasks.await(busOcr.process(com.google.mlkit.vision.common.InputImage.fromBitmap(img, 0))).text }.getOrDefault("")
+        when (val r = bus.read(t.id, text)) {
+            null -> return
+            BusReader.GIVE_UP -> if (gemma.ready) gemma.ask("Read the route number on the front of this bus. Answer only the number, or none.", img) { a ->
+                bus.fallback(a.orEmpty())?.let { w -> runOnUiThread { announceBus(w) } }
+            }
+            else -> runOnUiThread { announceBus(r) }
+        }
+    }
+
+    private fun announceBus(words: String) {
+        if (alarmOn) return
+        feedback.play(listOf(Alert(words, Buzz.SIDE, null, words))); said = words
+        Log.i(TAG, "bus: $words")
+    }
+
+    /** The full-resolution preview (UI thread only), fetched from the analysis thread; null if not quick. */
+    private fun previewFrame(): Bitmap? {
+        val tv = preview as? android.view.TextureView ?: return null
+        val task = java.util.concurrent.FutureTask { if (tv.isAvailable) tv.bitmap else null }
+        main.post(task)
+        return runCatching { task.get(300, java.util.concurrent.TimeUnit.MILLISECONDS) }.getOrNull()
+    }
+
+    /** Fall: say so and wait 7 s for a volume key (no popup). No press: siren + "calling emergency contacts". */
+    @Volatile private var fallPending = false
+    /** Fall countdown or siren: the banner and the siren own the phone; routine alerts wait. */
+    private val alarmOn get() = fallPending || emergency.active
+    private val fallAlarm = Runnable {
+        if (!fallPending) return@Runnable
+        fallPending = false
+        emergency.start()
+        said = "EMERGENCY"
+        feedback.urgent(sms.alert("I may have fallen and need help."))
+        main.postDelayed({ if (emergency.active) feedback.urgent("I have fallen and need help.") }, 4000)
+        Log.i(TAG, "fall: no response in ${Settings.fallCancelMs / 1000} s, siren on")
+    }
+
+    private fun fallDetected() {
+        if (fallPending || emergency.active) return
+        fallPending = true
+        said = "FALL"
+        feedback.urgent("Fall detected. If you are OK, press a volume key. Otherwise in 7 seconds I will sound an alarm and call your emergency contacts.")
+        feedback.buzz()
+        main.postDelayed(fallAlarm, Settings.fallCancelMs)
+        main.postDelayed(fallWarn, Settings.fallCancelMs - 3000)
+        Log.i(TAG, "fall: detected, waiting ${Settings.fallCancelMs} ms for a key")
+    }
+
+    private val fallWarn = Runnable { if (fallPending) { feedback.urgent("Alarm in 3 seconds."); feedback.buzz() } }
+
+    private fun cancelFall() {
+        fallPending = false
+        main.removeCallbacks(fallAlarm); main.removeCallbacks(fallWarn)
+        said = "OK"
+        feedback.urgent("OK. Glad you're fine.")
+        Log.i(TAG, "fall: cancelled by the user")
+    }
+
     private fun startEmergency() {
         emergency.start()
+        main.postDelayed({ if (emergency.active) feedback.urgent(sms.alert("I need help.")) }, 6000)
         said = "EMERGENCY"
         val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val pct = b?.let { it.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) * 100 / it.getIntExtra(BatteryManager.EXTRA_SCALE, 100) }
@@ -409,13 +612,22 @@ class MainActivity : ComponentActivity() {
 
     /** Horn, siren, bell, reversing, barking: vibration pattern plus two words. */
     private fun heard(d: Danger) {
-        if (voice.listening || activity.current == Activity.VEHICLE) return // inside a vehicle, horns are constant
+        if (voice.listening || alarmOn || activity.current == Activity.VEHICLE) return // inside a vehicle, horns are constant
         feedback.play(listOf(Alert(d.spoken, Buzz.WARN, Tacton.SOUND, d.spoken)))
         said = "Heard: ${d.spoken}"
         saidLevel = Buzz.WARN
     }
 
     private fun singlePress(keyCode: Int, event: KeyEvent) {
+        // Calibration: volume down marks each step done (and starts / stops each walk).
+        calibration?.let { c ->
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                feedback.buzz() // felt confirmation of the press
+                val now = SystemClock.elapsedRealtime(); val steps = ego.stepCount
+                analysisThread.execute { c.press(now, steps).takeIf { it.isNotEmpty() }?.let { runOnUiThread { feedback.answer(it) }; said = it } }
+                return
+            }
+        }
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
             if (egoLog.recording) analysisThread.execute { // label toggle while recording training data
                 egoLog.label = 1 - egoLog.label
@@ -440,6 +652,13 @@ class MainActivity : ComponentActivity() {
 
     /** Voice question -> deterministic answer. Safety questions never reach anything that could say yes. */
     private fun answer(alternatives: List<String>) {
+        calibration?.takeIf { it.step == Calibration.Step.HEIGHT }?.let { c ->
+            val heard = alternatives.firstOrNull { Calibration.parseHeightM(it) != null } ?: alternatives.firstOrNull().orEmpty()
+            val next = c.heard(heard, SystemClock.elapsedRealtime())
+            if (!c.heightM.isNaN()) Settings.cameraHeightM = Calibration.cameraHeightFor(c.heightM)
+            feedback.answer(next); said = next
+            return
+        }
         val (text, ask) = bestIntent(alternatives)
         Log.i(TAG, "asked: $alternatives -> $ask")
         val reply = when (ask) {
@@ -452,7 +671,8 @@ class MainActivity : ComponentActivity() {
                         fallback = "I can't see a $what.")) return
                 else "I can only find everyday objects like chairs, people, bottles or bags."
             }
-            Ask.STOP -> { finder = null; "Stopped." }
+            Ask.STOP -> { finder = null; straight = null; "Stopped." }
+            Ask.STRAIGHT -> { straight = StraightLine(ego.headingDeg, SystemClock.elapsedRealtime()); "Keeping you straight. Walk." }
             Ask.SIT -> { analysisThread.execute { activity.force(Activity.SITTING, SystemClock.elapsedRealtime()) }; Activity.SITTING.spoken }
             Ask.VEHICLE -> { analysisThread.execute { activity.force(Activity.VEHICLE, SystemClock.elapsedRealtime()) }; Activity.VEHICLE.spoken }
             Ask.WALK -> { analysisThread.execute { activity.force(Activity.WALKING, SystemClock.elapsedRealtime()) }; "Walking. Full guidance." }
@@ -596,6 +816,7 @@ class MainActivity : ComponentActivity() {
         val (luma, sharp) = frameStats(tiny, 64, 48)
         val (pitch, roll) = ego.gravity.let { tiltDegrees(it[0], it[1], it[2]) }
         val health = assess(luma, sharp, pitch, roll)
+        calibration?.let { c -> calibrationFrame(c, t2, pitch) }
 
         // Depth on the NPU every Nth frame: drop-offs, head height, unnamed obstacles, and metres per object.
         activity.update(t2, ego.lastStepMs, ego.vibration) // only throttles detection; not announced
@@ -604,7 +825,7 @@ class MainActivity : ComponentActivity() {
         if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
             // Drop-offs only matter while walking; at a desk the table top would be mistaken for the floor.
-            val walking = activity.current == Activity.WALKING
+            val walking = activity.current == Activity.WALKING || calibration?.walking == true
             hazards = withoutFurnitureFloor(depthAnalyzer.analyze(depth.run(frame), pitch, walking, t2, motion.speed), tracks)
             depthMs = SystemClock.elapsedRealtime() - d0
             depthReady = true
@@ -620,7 +841,7 @@ class MainActivity : ComponentActivity() {
         hazards = hazards.copy(dropAtM = if (confirmed) dropNow!!.dropAheadM else null, dropIsStep = false)
         val dropHaptic = dropNow?.haptic ?: app.nadaka.drop.DropHaptic.NONE
         dropOut = dropNow?.copy(transition = null, haptic = app.nadaka.drop.DropHaptic.NONE) // each event once
-        tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
+        tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box, it.label) }
         if (health == Health.DARK && !torchOn) { torchOn = true; setTorch(true) }
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; setTorch(false) }
         chooseLens(t2, tracks)
@@ -633,18 +854,25 @@ class MainActivity : ComponentActivity() {
         }
         // Drop-off is always spoken: on confirmation, then again every hazardRepeatMs while it stays confirmed.
         // Not gated on listening, finding or an answer in progress: this one interrupts everything.
-        if (confirmed && (risingDrop || t2 - dropSaidMs >= Settings.hazardRepeatMs)) {
+        if (!alarmOn && confirmed && (risingDrop || t2 - dropSaidMs >= Settings.hazardRepeatMs)) {
             dropSaidMs = t2
             val m = dropNow!!.dropAheadM
             val words = if (m.isNaN()) "Stop. Drop ahead." else "Stop. Drop ahead, ${metres(m)}."
             feedback.warn(words); said = words; saidLevel = Buzz.WARN
         }
-        policy.decide(tracks, health, t2, hazards.copy(dropAtM = null), activity.current).takeIf { it.isNotEmpty() && finder == null }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+        // Stairs going up: say it once, again every few seconds while it stays in view.
+        dropNow?.stairsUpM?.takeIf { !it.isNaN() && !alarmOn && t2 - stairsSaidMs >= Settings.stairsRepeatMs }?.let {
+            stairsSaidMs = t2
+            val words = "Stairs going up ahead, ${metres(it)}."
+            feedback.play(listOf(Alert(words, Buzz.WARN, Tacton.HEAD, "Stairs up."))); said = words; saidLevel = Buzz.WARN
+        }
+        if (!alarmOn) { walkStraight(t2); readBus(t2, tracks) }
+        policy.decide(tracks, health, t2, hazards.copy(dropAtM = null), activity.current).takeIf { it.isNotEmpty() && finder == null && !alarmOn }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
-        feedback.haptics.drop(dropHaptic) // after the alert batch so nothing overrides it; ignores sound settings
+        if (!alarmOn) feedback.haptics.drop(dropHaptic) // after the alert batch so nothing overrides it; ignores sound settings
 
         // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
-        if (activity.current == Activity.WALKING && !policy.blind) { // ticks only while walking (also while the mic is open)
+        if (activity.current == Activity.WALKING && !policy.blind && !alarmOn) { // ticks only while walking (also while the mic is open)
             val inPathM = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() && inPath(it) && (it.sure || it.metres < Settings.veryCloseM) }
                 .minOfOrNull { it.metres }
             feedback.haptics.proximity(listOfNotNull(inPathM, hazards.floorObstacleAtM).minOrNull() ?: Float.NaN)
@@ -662,7 +890,7 @@ class MainActivity : ComponentActivity() {
             mode = activity.current.name, heat = heat.tier, lens = Settings.zoom, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), drop = dropNow, imgW = frame.width, imgH = frame.height,
-            loading = false, floorTrusted = depthAnalyzer.floorTrusted, sensorError = if (motionMissing) "No motion sensor." else null,
+            loading = false, alarm = when { fallPending -> "FALL"; emergency.active -> "SIREN"; else -> null }, floorTrusted = depthAnalyzer.floorTrusted, calibrating = calibration?.instruction, sensorError = if (motionMissing) "No motion sensor." else null,
             baroHPa = if (pressure == null) Float.NaN else drop.barometer.filteredPressure, atMs = t2,
         )
         screen.post(st)
@@ -713,6 +941,9 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     }
 
     fun buzz() = vibrator.vibrate(side)
+
+    /** Must be heard whatever the Audio switch or an open mic says (fall, emergency). */
+    fun urgent(text: String) { answering = false; tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "urgent") }
 
     /** Danger that must be heard now: cuts off anything being said, including an answer. */
     fun warn(text: String) { if (!Prefs.audioOn || listening()) return; answering = false; tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "warn") }

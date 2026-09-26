@@ -30,7 +30,7 @@ data class DepthResult(
     companion object { val UNRELIABLE = DepthResult(DepthVerdict.UNRELIABLE, 0f) }
 }
 
-data class GroundResult(val score: Float, val reliable: Boolean, val breakAway: Boolean, val residualM: Float = Float.NaN) {
+data class GroundResult(val score: Float, val reliable: Boolean, val breakAway: Boolean, val residualM: Float = Float.NaN, val belowM: Float = Float.NaN) {
     companion object { val UNRELIABLE = GroundResult(0f, false, false) }
 }
 

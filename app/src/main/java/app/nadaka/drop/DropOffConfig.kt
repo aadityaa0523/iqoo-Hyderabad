@@ -34,6 +34,17 @@ object DropOffConfig {
     var DEPTH_MIN_CONFIDENCE = 0.45f
     var DEPTH_JUMP_THRESHOLD = 0.08f     // far side at least 8 % less disparity than the near side (vs floor)
     var DEPTH_CONTINUITY_TOLERANCE = 0.05f // |jump| below this with a floor-like far side = floor continues
+    // Stairs up (StairsUpAnalyzer)
+    var STAIRS_RISE_M = 0.08f            // leaves the floor
+    var STAIRS_SPAN_M = 1.2f             // judged over this much distance
+    var STAIRS_MIN_TOP_M = 0.3f          // climbs at least this much (a kerb doesn't)
+    var STAIRS_SLOPE_MIN = 0.35f         // ~20 deg; ramps are gentler
+    var STAIRS_SLOPE_MAX = 1.3f          // ~52 deg; walls are near vertical
+    var STAIRS_CONFIRM = 3               // of the last 5 evaluations
+    // Reflection guard (shiny floor / puddle mirroring the ceiling)
+    var REFLECTION_DEEP_M = 1.2f         // a single edge "dropping" deeper than this is suspicious
+    var REFLECTION_SIMILAR_LUMA = 20f    // near and far side look like the same floor
+    var REFLECTION_HIGHLIGHT_LUMA = 200f // or the far side is a bright mirror image of lights / sky
     var DEPTH_MAX_AGE_MS = 250L          // older depth frames are UNRELIABLE for this evaluation
 
     // Ground plane (3D fit in metres through the floor ruler).

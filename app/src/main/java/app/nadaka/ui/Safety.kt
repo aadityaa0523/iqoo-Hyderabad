@@ -58,9 +58,15 @@ fun relevant(tracks: List<Track>) = tracks.filter {
 private fun inPath(t: Track) = abs(t.box.centerX() - 0.5f) < 0.22f
 
 fun safetyOf(s: HudState): Safety {
+    // A fall / siren outranks everything, even camera problems: it is about the person, not the path.
+    when (s.alarm) {
+        "FALL" -> return Safety(Level.DANGER, Glyph.STOP, "FALL DETECTED", null, "Press a volume key if you are OK.", status = "FALL")
+        "SIREN" -> return Safety(Level.DANGER, Glyph.STOP, "EMERGENCY", "CALLING FOR HELP", "Press a volume key to stop the alarm.", status = "EMERGENCY")
+    }
     s.cameraError?.let { return Safety(Level.ERROR, Glyph.OFF, "CAMERA OFF", null, "$it Use your cane.", status = "SAFETY OFF", statusOn = false) }
     s.error?.let { return Safety(Level.ERROR, Glyph.OFF, "SAFETY PAUSED", null, "Something went wrong. Use your cane.", status = "SAFETY OFF", statusOn = false) }
     if (s.said == "EMERGENCY") return Safety(Level.DANGER, Glyph.STOP, "EMERGENCY", "ALARM ON", "Press a volume key to stop.", status = "EMERGENCY")
+    s.calibrating?.let { return Safety(Level.INFO, Glyph.WAIT, "CALIBRATING", null, it, status = "CALIBRATING") }
     if (s.loading) return Safety(Level.INFO, Glyph.WAIT, "STARTING", null, "Loading on-device AI.", status = "STARTING", statusOn = false)
     s.sensorError?.let { return Safety(Level.ERROR, Glyph.OFF, "SENSOR OFF", null, "$it Drop alerts are off. Use your cane.", status = "LIMITED", statusOn = false) }
     if (s.mode == "READ") return Safety(Level.INFO, Glyph.PAUSE, "READING", null, "Hold the text in front of the camera.", status = "READING")
@@ -86,6 +92,9 @@ fun safetyOf(s: HudState): Safety {
         return Safety(Level.CAUTION, Glyph.WARN, "CAUTION", "${coming.label.uppercase()} COMING", null, coming.metres, directionOf(coming.bearing))
     if (drop?.state == DropState.POSSIBLE_DROP)
         return Safety(Level.CAUTION, Glyph.WARN, "POSSIBLE DROP", null, "Step ahead. Check with your cane.", drop.dropAheadM, "AHEAD")
+    drop?.stairsUpM?.takeIf { !it.isNaN() }?.let {
+        return Safety(Level.CAUTION, Glyph.WARN, "STAIRS UP", null, "Steps going up ahead.", it, "AHEAD")
+    }
     if (drop?.state == DropState.PATH_NOT_TRAVERSABLE) {
         val r = drop.pathReason
         return if ("wall" in r) Safety(Level.CAUTION, Glyph.WARN, "BLOCKED AHEAD", null, "Something is right in front of you.")
@@ -93,6 +102,9 @@ fun safetyOf(s: HudState): Safety {
     }
     val obstacle = s.tracks.filter { it.sure && inPath(it) && !it.metres.isNaN() && it.metres < Settings.closeM }.minByOrNull { app.nadaka.urgency(it) }
     if (obstacle != null) return Safety(Level.CAUTION, Glyph.WARN, obstacle.label.uppercase(), null, "In your path.", obstacle.metres, directionOf(obstacle.bearing))
+    s.hazards.waistAtM?.let {
+        return Safety(Level.CAUTION, Glyph.WARN, "OBSTACLE", null, "Something at waist height.", it, "AHEAD")
+    }
     s.hazards.floorObstacleAtM?.takeIf { it < Settings.closeM }?.let {
         return Safety(Level.CAUTION, Glyph.WARN, "OBSTACLE", null, "Low object in your path.", it, "AHEAD")
     }

@@ -104,7 +104,7 @@ class GroundPlaneAnalyzer {
         if (nf < 6) return GroundResult(0f, true, false, rms)
         val below = -medianOf(far, nf)
         val brk = below >= C.GROUND_BREAK_M
-        return GroundResult(if (brk) clamp01(below / C.GROUND_FULL_DROP_M) else 0f, true, brk, rms)
+        return GroundResult(if (brk) clamp01(below / C.GROUND_FULL_DROP_M) else 0f, true, brk, rms, below)
     }
 
     /** Least squares for z = c0 + c1 x + c2 y (3x3 normal equations, Cramer's rule). */
@@ -121,6 +121,48 @@ class GroundPlaneAnalyzer {
         val d = det(m)
         if (abs(d) < 1e-9) return null
         return FloatArray(3) { col -> (det(Array(3) { r -> DoubleArray(3) { c -> if (c == col) b[r] else m[r][c] } }) / d).toFloat() }
+    }
+}
+
+/**
+ * Stairs going UP: the height profile along the walking corridor (through the floor ruler) first leaves the
+ * floor, then keeps rising at a stair-like slope. A wall rises almost vertically (slope far above stairs),
+ * a ramp too gently, a single kerb stops rising. Distance = where the first step starts. NaN = none.
+ */
+class StairsUpAnalyzer {
+    private val ahead = FloatArray(80); private val height = FloatArray(80); private val tmpA = FloatArray(5); private val tmpH = FloatArray(5)
+
+    fun analyze(depth: DepthInput?, geo: FloorGeometry?): Float {
+        if (depth == null || geo == null || !depth.floorTrusted || depth.ageMs > C.DEPTH_MAX_AGE_MS) return Float.NaN
+        var n = 0
+        var y = 0.96f
+        while (y > 0.30f && n < ahead.size) { // bottom (near) to top (far)
+            var k = 0
+            for (x in floatArrayOf(0.42f, 0.46f, 0.5f, 0.54f, 0.58f)) {
+                val p = geo.point(x, y, depth.at(x, y)) ?: continue
+                tmpA[k] = p[0]; tmpH[k] = p[2]; k++
+            }
+            if (k >= 3) { ahead[n] = medianOf(tmpA, k); height[n] = medianOf(tmpH, k); if (ahead[n] in 0.3f..6f) n++ }
+            y -= 0.01f
+        }
+        if (n < 10) return Float.NaN
+        // First rise off the floor, after some floor right in front of the feet.
+        var i0 = -1
+        for (i in 3 until n) if (height[i] > C.STAIRS_RISE_M && (0 until 3).all { kotlin.math.abs(height[it]) < C.STAIRS_RISE_M }) { i0 = i; break }
+        if (i0 < 0) return Float.NaN
+        val start = ahead[i0]
+        // Least-squares slope of height over distance across the next ~1.2 m.
+        var sx = 0f; var sy = 0f; var sxx = 0f; var sxy = 0f; var m = 0; var top = 0f
+        for (i in i0 until n) {
+            if (ahead[i] < start - 0.05f || ahead[i] > start + C.STAIRS_SPAN_M) continue
+            sx += ahead[i]; sy += height[i]; sxx += ahead[i] * ahead[i]; sxy += ahead[i] * height[i]; m++
+            top = maxOf(top, height[i])
+        }
+        if (m < 5 || top < C.STAIRS_MIN_TOP_M) return Float.NaN
+        val den = m * sxx - sx * sx
+        if (kotlin.math.abs(den) < 1e-6f) return Float.NaN // no spread in distance: a wall
+        val slope = (m * sxy - sx * sy) / den
+        return if (slope in C.STAIRS_SLOPE_MIN..C.STAIRS_SLOPE_MAX) start else Float.NaN
     }
 }
 

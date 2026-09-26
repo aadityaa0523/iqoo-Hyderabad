@@ -23,15 +23,24 @@ class EgoMotion(ctx: Context) : SensorEventListener {
     @Volatile private var pitchRate = 0f
     @Volatile var gravity = floatArrayOf(0f, 9.8f, 0f) // device axes; upright portrait = +y
     @Volatile var lastStepMs = 0L
+    @Volatile var stepCount = 0
+    /** Heading of the camera, degrees clockwise (gyro + accelerometer, no magnetometer: steady indoors). */
+    @Volatile var headingDeg = 0f
+    private val rot = FloatArray(9); private val remap = FloatArray(9); private val orient = FloatArray(3) // running total from the step detector (calibration counts between presses)
     /** Smoothed energy of acceleration without gravity: ~0.02 standing, high on a moving vehicle floor. */
     @Volatile var vibration = 0f
     private val steps = ArrayDeque<Long>()
+    private val fall = FallDetector()
+    /** Called on the sensor thread when a fall is detected. */
+    var onFall: () -> Unit = {}
 
     fun start() {
         sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         sm.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
+        sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) } // fall detection
     }
 
     fun stop() = sm.unregisterListener(this)
@@ -44,12 +53,21 @@ class EgoMotion(ctx: Context) : SensorEventListener {
                 pitchRate = 0.7f * pitchRate + 0.3f * e.values[0]
             }
             Sensor.TYPE_GRAVITY -> gravity = e.values.copyOf()
+            Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                // Upright portrait phone, camera forward: remap so the azimuth is where the camera points.
+                SensorManager.getRotationMatrixFromVector(rot, e.values)
+                SensorManager.remapCoordinateSystem(rot, SensorManager.AXIS_X, SensorManager.AXIS_Z, remap)
+                SensorManager.getOrientation(remap, orient)
+                headingDeg = Math.toDegrees(orient[0].toDouble()).toFloat()
+            }
+            Sensor.TYPE_ACCELEROMETER -> if (fall.update(SystemClock.elapsedRealtime(), e.values[0], e.values[1], e.values[2])) onFall()
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 val m2 = e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]
                 vibration += 0.05f * (m2 - vibration)
             }
             Sensor.TYPE_STEP_DETECTOR -> {
                 lastStepMs = SystemClock.elapsedRealtime()
+                stepCount++
                 synchronized(steps) { steps.addLast(lastStepMs) }
             }
         }

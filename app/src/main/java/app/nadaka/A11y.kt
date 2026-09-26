@@ -46,6 +46,16 @@ object Prefs {
     var depthHc = false         // depth map as brightness bands + contour lines
     var reducedMotion = false
     var heroMode = app.nadaka.ui.HeroMode.BLEND
+    // Calibration (Calibration.kt). Applied to Settings on load.
+    var calibrated = false
+    var calibratedAtMs = 0L
+    var bodyHeightM = Float.NaN
+    var cameraHeightM = Float.NaN
+    var depthScale = Float.NaN
+    var hfovDeg = Float.NaN
+    var vfovDeg = Float.NaN
+    var strideM = Float.NaN
+    var contacts: List<Contact> = emptyList() // emergency contacts, at most 2
 
     val lowVision get() = palette.highContrast && textScale >= 1.3f
 
@@ -65,6 +75,19 @@ object Prefs {
         val systemNoMotion = android.provider.Settings.Global.getFloat(ctx.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
         reducedMotion = p.getBoolean("reducedMotion", systemNoMotion)
         heroMode = runCatching { app.nadaka.ui.HeroMode.valueOf(p.getString("heroMode", "BLEND")!!) }.getOrDefault(app.nadaka.ui.HeroMode.BLEND)
+        calibrated = p.getBoolean("calibrated", false)
+        calibratedAtMs = p.getLong("calibratedAtMs", 0L)
+        bodyHeightM = p.getFloat("bodyHeightM", Float.NaN)
+        cameraHeightM = p.getFloat("cameraHeightM", Float.NaN)
+        depthScale = p.getFloat("depthScale", Float.NaN)
+        hfovDeg = p.getFloat("hfovDeg", Float.NaN)
+        vfovDeg = p.getFloat("vfovDeg", Float.NaN)
+        strideM = p.getFloat("strideM", Float.NaN)
+        contacts = p.getString("contacts", "").orEmpty().lines().mapNotNull { l ->
+            l.split('\t').takeIf { it.size == 2 }?.let { Contact(it[0], it[1]) } }
+        if (!strideM.isNaN()) Settings.strideM = strideM
+        if (!cameraHeightM.isNaN()) Settings.cameraHeightM = cameraHeightM
+        if (!hfovDeg.isNaN() && !vfovDeg.isNaN()) { Settings.hfovDeg = hfovDeg; Settings.vfovDeg = vfovDeg }
     }
 
     fun save(ctx: Context) = ctx.getSharedPreferences("nadaka", Context.MODE_PRIVATE).edit()
@@ -72,7 +95,11 @@ object Prefs {
         .putBoolean("announce", announce).putBoolean("wizardDone", wizardDone)
         .putBoolean("hapticsFirst", Settings.hapticsFirst).putBoolean("chatty", Settings.chatty)
         .putBoolean("audioOn", audioOn).putBoolean("hapticOn", hapticOn).putBoolean("simplified", simplified)
-        .putBoolean("depthHc", depthHc).putBoolean("reducedMotion", reducedMotion).putString("heroMode", heroMode.name).apply()
+        .putBoolean("depthHc", depthHc).putBoolean("reducedMotion", reducedMotion).putString("heroMode", heroMode.name)
+        .putBoolean("calibrated", calibrated).putLong("calibratedAtMs", calibratedAtMs).putFloat("bodyHeightM", bodyHeightM)
+        .putFloat("cameraHeightM", cameraHeightM).putFloat("depthScale", depthScale).putFloat("hfovDeg", hfovDeg)
+        .putFloat("vfovDeg", vfovDeg).putFloat("strideM", strideM)
+        .putString("contacts", contacts.joinToString("\n") { "${it.name}\t${it.number}" }).apply()
 
     /** One switch for the whole "Low Vision / Senior" profile. */
     fun applyLowVision(on: Boolean) {

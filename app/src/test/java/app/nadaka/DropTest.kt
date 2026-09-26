@@ -297,5 +297,44 @@ class DropTest {
         val ms = (System.nanoTime() - t) / 50e6
         assertTrue("$ms ms per evaluation", ms < 20)
     }
+
+    // ---------- stairs going up ----------
+
+    private fun stairsUp(at: Float, seed: Int = 1) = scene(seed = seed,
+        height = { a, _ -> if (a <= at) 0f else 0.17f * (1 + ((a - at) / 0.28f).toInt()) },
+        albedo = { a, _, h -> if (h < 0.01f) 125f else if (((a - at) / 0.28f).toInt() % 2 == 0) 90f else 160f })
+
+    @Test fun stairsUpAreFoundAndNotCalledAWall() {
+        val o = run(DropPipeline(false), List(5) { stairsUp(2f, seed = it) })
+        assertTrue("stairs up: ${o.map { it.stairsUpM }}", !o.last().stairsUpM.isNaN())
+        assertEquals(2f, o.last().stairsUpM, 0.4f)
+        assertTrue(o.last().state != DropState.PATH_NOT_TRAVERSABLE)
+        assertTrue(states(o).none { it == DropState.CONFIRMED_DROP })
+    }
+
+    @Test fun wallRampAndKerbAreNotStairsUp() {
+        val wall = scene(height = { a, _ -> if (a > 1.8f) 3f else 0f }, albedo = { _, _, h -> if (h > 0.01f) 170f else 110f })
+        val ramp = scene(height = { a, _ -> if (a > 1.8f) (a - 1.8f) * 0.08f else 0f })
+        val kerb = scene(height = { a, _ -> if (a > 1.8f) 0.15f else 0f }, albedo = { _, _, h -> if (h > 0.01f) 90f else 130f })
+        for ((name, sc) in listOf("wall" to wall, "ramp" to ramp, "kerb" to kerb))
+            assertTrue(name, run(DropPipeline(false), List(5) { sc }).last().stairsUpM.isNaN())
+    }
+
+    // ---------- reflections ----------
+
+    @Test fun shinyFloorReflectionNeverSaysStop() {
+        // Depth sees a 2.5 m "hole" (the mirrored ceiling) past a line, but the floor looks the same on both sides.
+        val mirror = List(6) { scene(seed = it,
+            height = { a, l -> if (a in 2f..3.2f && kotlin.math.abs(l) < 0.9f) -2.5f else 0f },
+            albedo = { a, l, _ -> if (a in 2f..3.2f && kotlin.math.abs(l) < 0.9f) 135f else 125f }) }
+        val o = run(DropPipeline(false), mirror)
+        assertTrue(states(o).toString(), states(o).none { it == DropState.CONFIRMED_DROP })
+    }
+
+    @Test fun realDeepDropStillConfirms() {
+        // A platform edge: 1.5 m down onto a dark, different surface.
+        val platform = List(6) { step(at = 2f, drop = 1.5f, seed = it) }
+        assertTrue(states(run(DropPipeline(false), platform)).contains(DropState.CONFIRMED_DROP))
+    }
 }
 

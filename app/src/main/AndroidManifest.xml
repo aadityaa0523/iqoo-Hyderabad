@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <!-- Only for 127.0.0.1: the on-device Qwen server (see network_security_config). No internet use. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Emergency: text the user's chosen contacts with where the phone is (fall / both-keys emergency). -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:label="Nadaka"

@@ -95,7 +95,7 @@ object Answers {
     }
 }
 
-enum class Ask { SAFETY, EMERGENCY, FIND, STOP, SIT, VEHICLE, WALK, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
+enum class Ask { SAFETY, STRAIGHT, EMERGENCY, FIND, STOP, SIT, VEHICLE, WALK, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 /** Typical recognizer slips on short commands, normalised before matching. */
@@ -117,6 +117,7 @@ fun intentOf(text: String): Ask {
     val t = normalise(text)
     if (SafetyGate.isSafetyQuestion(t)) return Ask.SAFETY
     return when {
+        Regex("""\b(walk straight|keep me straight|go straight|straight line|walking straight|help me cross)\b""").containsMatchIn(t) -> Ask.STRAIGHT
         Regex("""\b(emergency|sos|help me|i need help|call for help|bachao)\b""").containsMatchIn(t) -> Ask.EMERGENCY
         findTarget(t) != null -> Ask.FIND
         Regex("""^(stop|cancel|stop looking|never mind)\b""").containsMatchIn(t) -> Ask.STOP

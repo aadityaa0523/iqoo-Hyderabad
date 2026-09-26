@@ -111,6 +111,9 @@ class DepthAnalyzer {
         private set
 
     /** New lens or camera height: learn the floor ruler again (takes Settings.scaleLockFrames frames). */
+    /** A ruler saved by calibration. Still checked against the floor every frame (and relearned if stale). */
+    fun restore(s: Float) { if (s.isFinite() && s > 0f) scale = s }
+
     fun relearn() { scale = Float.NaN; pending.clear(); dropHits = 0; overheadHits = 0; lastDropM = Float.NaN; mismatch = 0 }
     private var dropHits = 0
     private var lastDropM = Float.NaN
@@ -154,7 +157,8 @@ class DepthAnalyzer {
                 val near = median(samples.takeLast(3)) / scale
                 floorTrusted = near in (1 / Settings.scaleTolerance)..Settings.scaleTolerance
             }
-            return Hazards()
+            // With a trusted ruler (calibration) the floor under my feet can be checked, so obstacles can be too.
+            return if (floorTrusted) Hazards(waistAtM = waistAhead(g, pitch)) else Hazards()
         }
         if (samples.size >= 3) {
             val m = median(samples)
@@ -235,7 +239,29 @@ class DepthAnalyzer {
             overheadAtM = overhead?.takeIf { overheadHits >= Settings.depthHits },
             overheadBearing = if (cols > 0) bearingSum / cols else 0f,
             floorObstacleAtM = obstacle,
+            waistAtM = waistAhead(g, pitch),
         )
+    }
+
+    /**
+     * Something at waist height (0.45-1.2 m above the floor) within reach in the walking corridor: a table top or
+     * counter edge the floor check misses because the floor continues underneath it. Needs 2+ columns to agree.
+     */
+    private fun waistAhead(g: Array<FloatArray>, pitch: Float): Float? {
+        var best = Float.MAX_VALUE; var cols = 0
+        for (c in DEPTH_COLS * 35 / 100 until DEPTH_COLS * 65 / 100) {
+            var near = Float.MAX_VALUE
+            for (r in 0 until DEPTH_ROWS) {
+                if (g[r][c] <= 0f) continue
+                val range = scale / g[r][c] / cos(rowAngle(r))
+                val a = pitch + rowAngle(r)
+                val ahead = range * cos(a)
+                val height = Settings.cameraHeightM - range * sin(a)
+                if (height in Settings.waistMinM..Settings.waistMaxM && ahead in 0.2f..Settings.closeM) near = minOf(near, ahead)
+            }
+            if (near < Float.MAX_VALUE) { cols++; best = minOf(best, near) }
+        }
+        return if (cols >= 2) best else null
     }
 
     /**
@@ -282,15 +308,17 @@ class DepthAnalyzer {
     }
 
     /** Median metric depth inside a box, or NaN. */
-    fun metresIn(b: Box): Float {
+    fun metresIn(b: Box, label: String = ""): Float {
         val g = grid ?: return Float.NaN
         if (scale.isNaN()) return Float.NaN
         // Centre half of the box, lower-middle part: that is the front object when boxes overlap,
         // and it avoids the background showing around the object's outline.
         val bh = b.bottom - b.top
         val bw = b.right - b.left
-        val r0 = ((b.top + bh * 0.4f) * DEPTH_ROWS).toInt().coerceIn(0, DEPTH_ROWS - 1)
-        val r1 = ((b.top + bh * 0.9f) * DEPTH_ROWS).toInt().coerceIn(r0, DEPTH_ROWS - 1)
+        // A table's lower box is empty space and the floor behind: measure its top edge, the part you walk into.
+        val (f0, f1) = if (label in SURFACES) 0.05f to 0.35f else 0.4f to 0.9f
+        val r0 = ((b.top + bh * f0) * DEPTH_ROWS).toInt().coerceIn(0, DEPTH_ROWS - 1)
+        val r1 = ((b.top + bh * f1) * DEPTH_ROWS).toInt().coerceIn(r0, DEPTH_ROWS - 1)
         val c0 = ((b.left + bw * 0.25f) * DEPTH_COLS).toInt().coerceIn(0, DEPTH_COLS - 1)
         val c1 = ((b.right - bw * 0.25f) * DEPTH_COLS).toInt().coerceIn(c0, DEPTH_COLS - 1)
         val v = ArrayList<Float>()

@@ -44,7 +44,7 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
         build()
         view.visibility = View.VISIBLE
         scroll.scrollTo(0, 0)
-        if (wizard) actions.say("Welcome to Nadaka. Settings are open. For bigger text, choose a text size. Tap Done at the top when finished. Voice and vibration work without the screen.")
+        if (wizard) actions.say("Welcome to Nadaka. Settings are open. For more accurate distances, tap Calibrate, 30 seconds. For bigger text, choose a text size. Tap Done at the top when finished. " + app.nadaka.FALL_GUIDE)
     }
 
     fun hide() {
@@ -86,6 +86,23 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
         choice("Camera image", CameraView.entries.map { it.label }, Prefs.camera.ordinal) { Prefs.camera = CameraView.entries[it] }
         toggle("Low vision preset", Prefs.lowVision, "Maximum contrast, extra large text, high contrast camera and depth.") { Prefs.applyLowVision(it) }
 
+        section("Calibration")
+        action("Calibrate  ·  30 seconds") { hide(); actions.calibrate() }
+        list.addView(t.label(
+            if (Prefs.calibrated) "Calibrated on " + java.text.DateFormat.getDateInstance().format(java.util.Date(Prefs.calibratedAtMs)) +
+                (if (Prefs.bodyHeightM.isNaN()) "." else ", height ${"%.0f".format(Prefs.bodyHeightM * 100)} cm.")
+            else "Not calibrated yet. Voice-guided: say your height, hold the phone, then two short walks: press volume down, walk, press again.",
+            Theme.LABEL, t.textDim).apply { setPadding(t.ipx(4f), t.ipx(6f), 0, 0) })
+
+        section("Emergency contacts")
+        Prefs.contacts.forEachIndexed { i, c -> action("Remove ${c.name}") { actions.removeContact(i); changed() } }
+        if (Prefs.contacts.size < 2) action("Add emergency contact") { actions.addContact() }
+        if (Prefs.contacts.isNotEmpty()) action("Send test message") { actions.testSms() }
+        list.addView(t.label(
+            if (Prefs.contacts.isEmpty()) "After a fall or an emergency, they get a text with a map link to where you are."
+            else "They get a text with your location when the siren starts: " + Prefs.contacts.joinToString(", ") { it.name } + ".",
+            Theme.LABEL, t.textDim).apply { setPadding(t.ipx(4f), t.ipx(6f), 0, 0) })
+
         section("Alerts")
         toggle("Audio", Prefs.audioOn, if (Prefs.audioOn) null else "Spoken alerts are off.") { Prefs.audioOn = it }
         toggle("Haptic", Prefs.hapticOn, if (Prefs.hapticOn) null else "Vibration alerts are off.") { Prefs.hapticOn = it }
@@ -97,6 +114,7 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
         action("Test haptic") { actions.testHaptic() }
         action("Test audio") { actions.testAudio() }
         action("Teach me the vibrations") { actions.lesson() }
+        action("How fall alerts work") { actions.say(app.nadaka.FALL_GUIDE) }
 
         section("Advanced")
         action("Diagnostics") { screen.diagnostics.show() }

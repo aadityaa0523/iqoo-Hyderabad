@@ -28,6 +28,8 @@ data class DropOutput(
     val baro: BaroStatus,
     val pathReason: String,
     val timingsMs: FloatArray,          // edge, depth, ground, fusion, total
+    val stairsUpM: Float = Float.NaN,   // confirmed stairs going up: distance to the first step
+    val reflection: Boolean = false,    // the best candidate looked like a reflection and was capped
 )
 
 /**
@@ -38,6 +40,9 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
     private val edgeAnalyzer = EdgeAnalyzer()
     private val depthAnalyzer = DropDepthAnalyzer()
     private val groundAnalyzer = GroundPlaneAnalyzer()
+    private val stairsAnalyzer = StairsUpAnalyzer()
+    private val stairsSeen = ArrayDeque<Boolean>()
+    private var stairsM = Float.NaN
     val barometer = BarometerAnalyzer(hasBarometer)
     private val history = DropEvidenceHistory()
     private val machine = DropStateMachine()
@@ -77,21 +82,34 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
         var bestCand: EdgeCandidate? = null
         var bestDepth = DepthResult.UNRELIABLE
         var tDepth = 0L; var tGround = 0L; var tFuse = 0L
+        var bestMirrored = false
         for (c in cands) {
             val a = System.nanoTime()
             val d = depthAnalyzer.analyze(depth, geo, c)
             val b = System.nanoTime()
             val g = groundAnalyzer.analyze(depth, geo, c)
             val e = System.nanoTime()
-            val ev = DropEvidenceFusion.fuse(now, c, d, g, ObjectSuppression.score(c, tracks), barometer)
+            var ev = DropEvidenceFusion.fuse(now, c, d, g, ObjectSuppression.score(c, tracks), barometer)
+            // Shiny floor / puddle: a "hole" deeper than any plausible single step, beyond an edge where the floor
+            // looks the same (or like a bright mirror image). Warn softly, never "Stop".
+            // ponytail: appearance heuristic; a real deep drop onto an identical-looking surface is capped too.
+            val mirrored = ev.evidenceClass == EvidenceClass.STRONG && g.belowM > C.REFLECTION_DEEP_M && looksReflected(gray, c)
+            if (mirrored) ev = ev.copy(evidenceClass = EvidenceClass.PRESENT)
             tDepth += b - a; tGround += e - b; tFuse += System.nanoTime() - e
             if (best == null || ev.evidenceClass > best.evidenceClass ||
-                (ev.evidenceClass == best.evidenceClass && ev.confidence > best.confidence)) { best = ev; bestCand = c; bestDepth = d }
+                (ev.evidenceClass == best.evidenceClass && ev.confidence > best.confidence)) { best = ev; bestCand = c; bestDepth = d; bestMirrored = mirrored }
         }
         val evidence = best ?: DropEvidence.none(now, barometer.descentConfidence, barometer.descendingConfirmed)
 
+        // Stairs going up: needs 3 of the last 5 evaluations.
+        val up = stairsAnalyzer.analyze(depth, geo)
+        stairsSeen.addLast(!up.isNaN()); if (stairsSeen.size > 5) stairsSeen.removeFirst()
+        if (!up.isNaN()) stairsM = up
+        val stairsUp = if (stairsSeen.count { it } >= C.STAIRS_CONFIRM) stairsM else Float.NaN
+
         val sensorBlocked = health == Health.BLOCKED
-        val pathReason = pathBlockedReason(depth, geo, health)
+        // Rising stairs are not a wall: don't call them "blocked".
+        val pathReason = pathBlockedReason(depth, geo, health).let { if (!stairsUp.isNaN() && "wall" in it) "" else it }
         if (!sensorBlocked && pathReason.isEmpty()) history.add(evidence)
         val transition = machine.update(now, history, sensorBlocked, pathReason.isNotEmpty(), barometer.descendingConfirmed)
         val haptic = haptics.update(now, machine.state, barometer.descendingConfirmed)
@@ -103,9 +121,26 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
             history.possibleCount(now), history.strongCount(now), machine.recoveryCount, history.classes(),
             barometer.status, pathReason,
             floatArrayOf((t1 - t0) / 1e6f, tDepth / 1e6f, tGround / 1e6f, tFuse / 1e6f, total),
+            stairsUp, bestMirrored,
         )
         log(out)
         return out
+    }
+
+    /** Mean brightness just beyond vs just before the edge (grey EDGE_IMG_W x EDGE_IMG_H). */
+    private fun looksReflected(gray: FloatArray, c: EdgeCandidate): Boolean {
+        fun mean(y0: Float, y1: Float): Float {
+            val w = C.EDGE_IMG_W; val h = C.EDGE_IMG_H
+            val r0 = (y0 * h).toInt().coerceIn(0, h - 1); val r1 = (y1 * h).toInt().coerceIn(r0, h - 1)
+            val c0 = (c.x0 * w).toInt().coerceIn(0, w - 1); val c1 = (c.x1 * w).toInt().coerceIn(c0, w - 1)
+            var s = 0f; var n = 0
+            for (r in r0..r1) for (x in c0..c1) { s += gray[r * w + x]; n++ }
+            return if (n == 0) Float.NaN else s / n
+        }
+        val far = mean(c.y - 0.10f, c.y - 0.02f)
+        val near = mean(c.y + 0.02f, c.y + 0.10f)
+        if (far.isNaN() || near.isNaN()) return false
+        return kotlin.math.abs(far - near) < C.REFLECTION_SIMILAR_LUMA || far > C.REFLECTION_HIGHLIGHT_LUMA
     }
 
     /** Forward traversal can't be judged: never reported as a drop. "" when the path is judgeable. */

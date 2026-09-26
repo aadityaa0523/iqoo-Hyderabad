@@ -30,4 +30,6 @@ data class HudState(
     val floorTrusted: Boolean = false, // the depth ruler matched the floor in the last depth frame
     val baroHPa: Float = Float.NaN,   // NaN = no barometer
     val atMs: Long = 0,
+    val calibrating: String? = null,
+    val alarm: String? = null,        // "FALL" (7 s countdown) or "SIREN": outranks everything on screen  // current calibration instruction, null when not calibrating
 )

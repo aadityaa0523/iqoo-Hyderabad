@@ -27,6 +27,10 @@ class Actions(
     val displayChanged: () -> Unit,
     val recordToggle: () -> Unit,
     val openBenchmark: () -> Unit,
+    val calibrate: () -> Unit,
+    val addContact: () -> Unit,
+    val removeContact: (Int) -> Unit,
+    val testSms: () -> Unit,
 )
 
 /**

@@ -9,7 +9,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /** The haptic vocabulary (docs/haptics.md). Meaning is carried by rhythm; intensity only adds urgency. */
-enum class Tacton { DROP, DROP_POSSIBLE, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
+enum class Tacton { DROP, DROP_POSSIBLE, VEER_LEFT, VEER_RIGHT, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
 
 /** Parking-sensor mapping: pulse interval for an obstacle at [m] metres in my path, or null = no pulse. */
 fun pulseIntervalMs(m: Float): Long? = when {
@@ -100,6 +100,9 @@ class Haptics(ctx: Context) {
         Tacton.DROP -> wave(0 to 0, 350 to 170, 200 to 0, 350 to 215, 200 to 0, 350 to 255)
         // Edge ahead, not yet confirmed: one short soft pulse.
         Tacton.DROP_POSSIBLE -> wave(0 to 0, 90 to 110)
+        // Walk straight: one long pulse = you drifted left (turn right); two short = drifted right (turn left).
+        Tacton.VEER_LEFT -> wave(0 to 0, 400 to 200)
+        Tacton.VEER_RIGHT -> wave(0 to 0, 120 to 200, 120 to 0, 120 to 200)
         // HEAD: two swells that ramp up ("rising" = up high).
         Tacton.HEAD -> wave(0 to 0, 80 to 70, 80 to 150, 120 to 255, 250 to 0, 80 to 70, 80 to 150, 120 to 255)
         // APPROACH: four short taps getting faster ("coming at you").
@@ -128,6 +131,8 @@ val LESSON = listOf(
     "Ticks mean something is in your path. Faster ticks, closer." to Tacton.TICK,
     "One soft pulse: an edge ahead. Slow down and check with your cane." to Tacton.DROP_POSSIBLE,
     "Three pulses, each stronger: stop, drop-off." to Tacton.DROP,
+    "Walking straight: one long pulse means you drifted left, turn right." to Tacton.VEER_LEFT,
+    "Two short pulses means you drifted right, turn left." to Tacton.VEER_RIGHT,
     "Two rising swells: something at head height." to Tacton.HEAD,
     "Four quick taps, getting faster: something is coming at you." to Tacton.APPROACH,
     "Long, short, long: I hear a horn, siren or barking dog around you." to Tacton.SOUND,

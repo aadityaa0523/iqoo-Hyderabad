@@ -2,7 +2,6 @@ package app.nadaka
 
 import android.content.Context
 import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.VibrationEffect
 import android.os.VibratorManager
 
@@ -66,21 +65,60 @@ class Finder(val label: String, private val startMs: Long) {
  */
 class Emergency(ctx: Context) {
     private val vibrator = ctx.getSystemService(VibratorManager::class.java).defaultVibrator
-    private var tone: ToneGenerator? = null
+    private val audio = ctx.getSystemService(AudioManager::class.java)
+    private var savedVolume = -1
+    private var siren: android.media.AudioTrack? = null
     var active = false
         private set
 
     fun start() {
         if (active) return
         active = true
-        tone = ToneGenerator(AudioManager.STREAM_ALARM, 100).also { it.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 20_000) }
-        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 300), intArrayOf(0, 255, 0), 0)) // repeats
+        // A siren nobody can hear is useless: alarm stream to maximum while it sounds, restored on stop.
+        savedVolume = runCatching { audio.getStreamVolume(AudioManager.STREAM_ALARM) }.getOrDefault(-1)
+        runCatching { audio.setStreamVolume(AudioManager.STREAM_ALARM, audio.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0) }
+        siren = wail().also { it.play() } // continuous: loops with no gap until stop()
+        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 1000), intArrayOf(255, 255), 0)) // continuous
+    }
+
+    /**
+     * A police-style wail: pitch sweeps 650 -> 1500 -> 650 Hz over 1.2 s, as one seamless loop
+     * (phase-continuous, starts and ends at the same pitch), on the alarm channel.
+     */
+    private fun wail(): android.media.AudioTrack {
+        val rate = 44_100
+        val n = rate * 12 / 10
+        val pcm = ShortArray(n)
+        // Pitch sweeps up and back down; scaled a hair so the total phase is a whole number of cycles:
+        // the last sample leads straight into the first, so the loop has no gap and no click.
+        val f = DoubleArray(n) { i -> 650 + 850 * (1 - kotlin.math.cos(2 * Math.PI * i / n)) / 2 }
+        val cycles = f.sum() / rate
+        val k = kotlin.math.round(cycles) / cycles
+        var phase = 0.0
+        for (i in 0 until n) {
+            pcm[i] = (kotlin.math.sin(phase) * 0.9 * Short.MAX_VALUE).toInt().toShort()
+            phase += 2 * Math.PI * f[i] * k / rate
+        }
+        val t = android.media.AudioTrack.Builder()
+            .setAudioAttributes(android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            .setAudioFormat(android.media.AudioFormat.Builder().setSampleRate(rate)
+                .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO).build())
+            .setTransferMode(android.media.AudioTrack.MODE_STATIC)
+            .setBufferSizeInBytes(n * 2)
+            .build()
+        t.write(pcm, 0, n)
+        t.setLoopPoints(0, n, -1) // forever
+        return t
     }
 
     fun stop() {
         if (!active) return
         active = false
-        tone?.release(); tone = null
+        siren?.run { runCatching { stop() }; release() }; siren = null
         vibrator.cancel()
+        if (savedVolume >= 0) runCatching { audio.setStreamVolume(AudioManager.STREAM_ALARM, savedVolume, 0) }
     }
 }

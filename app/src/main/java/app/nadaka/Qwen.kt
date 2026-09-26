@@ -34,6 +34,9 @@ class Qwen(private val ctx: Context) : Vlm {
         private set
     @Volatile override var ready = false
         private set
+    @Volatile private var stopping = false
+    private var restarts = 0 // consecutive; reset once the server has run for a while
+    private var watchdog: Thread? = null
 
     private val dir get() = File(ctx.getExternalFilesDir(null), "qwen")
     private val model get() = File(dir, Settings.qwenModelFile)
@@ -62,11 +65,12 @@ class Qwen(private val ctx: Context) : Vlm {
             }.start()
             // Wait for the model to load (health turns 200 when ready).
             while (System.currentTimeMillis() - t0 < 60_000) {
-                if (process?.isAlive != true) { status = "server exited"; Log.e(TAG, "qwen: server exited"); return@execute }
+                if (process?.isAlive != true) { status = "server exited"; Log.e(TAG, "qwen: server exited"); restartLater(); return@execute }
                 if (runCatching { get("/health") == 200 }.getOrDefault(false)) {
                     ready = true
                     status = "ready on ${Settings.qwenDevice}"
                     Log.i(TAG, "qwen: ready in ${System.currentTimeMillis() - t0} ms on ${Settings.qwenDevice}")
+                    startWatchdog()
                     return@execute
                 }
                 Thread.sleep(300)
@@ -78,7 +82,37 @@ class Qwen(private val ctx: Context) : Vlm {
         }
     }
 
-    fun stop() { ready = false; process?.destroy(); process = null }
+    fun stop() { stopping = true; ready = false; watchdog?.interrupt(); process?.destroy(); process = null }
+
+    /** The server can die (low memory kill, NPU reset). Check every 5 s; restart it, at most 3 times in a row. */
+    private fun startWatchdog() {
+        if (watchdog?.isAlive == true) return
+        watchdog = Thread {
+            var healthySinceMs = System.currentTimeMillis()
+            try {
+                while (!stopping) {
+                    Thread.sleep(5000)
+                    if (process?.isAlive == true) {
+                        if (System.currentTimeMillis() - healthySinceMs > 60_000) restarts = 0
+                        continue
+                    }
+                    if (stopping) break
+                    ready = false
+                    Log.w(TAG, "qwen: server died, restarting")
+                    restartLater()
+                    return@Thread // load() starts a new watchdog once ready
+                }
+            } catch (_: InterruptedException) { }
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun restartLater() {
+        if (stopping) return
+        if (restarts >= 3) { status = "stopped after 3 crashes"; Log.e(TAG, "qwen: $status"); return }
+        restarts++
+        status = "restarting ($restarts)"
+        Thread { Thread.sleep(2000L * restarts); if (!stopping) load() }.apply { isDaemon = true; start() }
+    }
 
     override fun ask(prompt: String, image: Bitmap?, onAnswer: (String?) -> Unit) = worker.execute {
         if (!ready) return@execute onAnswer(null)
@@ -111,6 +145,7 @@ class Qwen(private val ctx: Context) : Vlm {
             "First name the one main object in the centre of the photo, the thing they are pointing at or holding. " +
             "Then add at most one short detail that helps them: what it says, or one nearby obstacle. " +
             "One or two sentences, under 20 words. Direct, no greeting, no preamble, no description of the whole room. " +
+            "Prices and money are in Indian rupees. " +
             "Speak to them as you. Use left, ahead or right. Never guess distances or numbers you cannot read. " +
             "Never say it is safe to walk, move, cross or go, and never say the path is clear. " +
             "Example of the style (not of the content): A glass door ahead, handle on your right."

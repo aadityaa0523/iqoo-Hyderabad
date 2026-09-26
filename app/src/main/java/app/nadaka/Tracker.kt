@@ -69,7 +69,8 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
      * SURE: seen steadily, confident, fully in view, depth and size agree. UNSURE objects are only
      * spoken when they matter (approaching, or practically touching).
      */
-    val sure get() = hits >= Settings.sureHits && score >= Settings.sureScore && !edge && consistent
+    // Cut by the frame edge only mattered for the size guess; a depth-measured distance doesn't care (calibration).
+    val sure get() = hits >= Settings.sureHits && score >= Settings.sureScore && (!edge || !depthM.isNaN()) && consistent
     var features = FloatArray(0)
 
     val bearing get() = (box.centerX() - 0.5f) * Settings.hfovRad

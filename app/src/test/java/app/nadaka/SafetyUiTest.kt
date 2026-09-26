@@ -48,7 +48,7 @@ class SafetyUiTest {
         assertEquals("CAMERA OFF", safetyOf(HudState(cameraError = "Camera permission is off.")).headline)
         assertEquals(Level.ERROR, safetyOf(HudState(loading = false, error = "X")).level)
         assertEquals("SENSOR OFF", safetyOf(HudState(loading = false, sensorError = "No motion sensor.")).headline)
-        assertEquals("WALL AHEAD", safetyOf(live(drop(DropState.PATH_NOT_TRAVERSABLE, reason = "wall ahead"))).headline)
+        assertEquals("BLOCKED AHEAD", safetyOf(live(drop(DropState.PATH_NOT_TRAVERSABLE, reason = "wall ahead"))).headline)
         assertEquals("PAUSED", safetyOf(live(mode = "VEHICLE")).headline)
     }
 
