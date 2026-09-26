@@ -13,6 +13,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1"
+        ndk { abiFilters += "arm64-v8a" } // iQOO is arm64; keeps the APK small for phone downloads
     }
 
     // Shared debug key so laptop (adb) and GitHub Actions builds install over each other.

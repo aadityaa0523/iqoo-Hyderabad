@@ -43,7 +43,7 @@ object Settings {
 
 class MainActivity : ComponentActivity() {
     private lateinit var preview: PreviewView
-    private lateinit var overlay: Overlay
+    private lateinit var hud: Overlay
     private lateinit var feedback: Feedback
     private val analysisThread = Executors.newSingleThreadExecutor()
     private val detector by lazy { Detector(this) } // created on the analysis thread
@@ -53,8 +53,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         preview = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
-        overlay = Overlay(this)
-        setContentView(FrameLayout(this).apply { addView(preview); addView(overlay) })
+        hud = Overlay(this)
+        setContentView(FrameLayout(this).apply { addView(preview); addView(hud) })
         feedback = Feedback(this)
 
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
@@ -107,7 +107,7 @@ class MainActivity : ComponentActivity() {
         lastFrameMs = t2
         val status = "${detector.backend}  $fps fps  cam ${t1 - t0}ms  det ${t2 - t1}ms"
         Log.d(TAG, "$status  ${dets.joinToString { it.label }}")
-        overlay.post { overlay.show(dets, status, frame.width, frame.height) }
+        hud.post { hud.show(dets, status, frame.width, frame.height) }
     }
 }
 
