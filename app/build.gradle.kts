@@ -41,4 +41,6 @@ dependencies {
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    implementation("com.google.mlkit:text-recognition:16.0.1") // bundled Latin OCR, works offline
+    testImplementation("junit:junit:4.13.2")
 }

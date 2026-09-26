@@ -16,6 +16,7 @@ import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.util.Size
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -39,6 +40,10 @@ const val TAG = "NADAKA"
 object Settings {
     var minScore = 0.4f
     var speechCooldownMs = 2000L
+    var readTimeoutMs = 12000L
+    var minTextArea = 0.04f // text must cover this fraction of the frame, else "Move closer"
+    var coachCooldownMs = 2500L
+    var moneyTotalResetMs = 60000L // a new note after this gap starts a new total
 }
 
 class MainActivity : ComponentActivity() {
@@ -47,6 +52,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var feedback: Feedback
     private val analysisThread = Executors.newSingleThreadExecutor()
     private val detector by lazy { Detector(this) } // created on the analysis thread
+    private val reader by lazy { Reader() } // analysis thread only
+    private var reading = false // analysis thread only
     private var lastFrameMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,6 +97,15 @@ class MainActivity : ComponentActivity() {
         }, mainExecutor)
     }
 
+    // ponytail: volume-down starts READ; hold-to-switch and voice commands come in M5.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyDown(keyCode, event)
+        analysisThread.execute {
+            if (!reading) { reader.start(); reading = true; feedback.say("Reading.") }
+        }
+        return true
+    }
+
     private fun analyze(image: ImageProxy) {
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
@@ -99,6 +115,15 @@ class MainActivity : ComponentActivity() {
             else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
         }
         val t1 = SystemClock.elapsedRealtime()
+        if (reading) {
+            val (speech, done) = reader.step(frame)
+            speech?.let { feedback.say(it, strong = done) }
+            if (done) reading = false
+            val status = "READ  ocr ${SystemClock.elapsedRealtime() - t1}ms"
+            Log.d(TAG, "$status  ${speech.orEmpty()}")
+            hud.post { hud.show(emptyList(), status, frame.width, frame.height) }
+            return
+        }
         val dets = detector.detect(frame, Settings.minScore)
         val t2 = SystemClock.elapsedRealtime()
         feedback.onDetections(dets)
@@ -118,9 +143,15 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     private val lastSaid = HashMap<String, Long>()
     private val side = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
     private val ahead = VibrationEffect.createWaveform(longArrayOf(0, 80, 80, 80), -1)
+    private val result = VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) tts.language = Locale.ENGLISH
+    }
+
+    fun say(text: String, strong: Boolean = false) {
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text)
+        if (strong) vibrator.vibrate(result)
     }
 
     fun onDetections(dets: List<Detection>) {
