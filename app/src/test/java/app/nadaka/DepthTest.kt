@@ -62,6 +62,66 @@ class DepthTest {
         assertNull(an.analyze(scene { floor(it, extraDrop = 0.8f, dropAt = 1.8f) }, pitchDeg).dropAtM)
     }
 
+    /** Like [scene] but the hit distance may depend on the column too (patches, partial drops). */
+    private fun sceneCols(hit: (a: Float, c: Int) -> Float): Array<FloatArray> {
+        val pitch = Math.toRadians(pitchDeg.toDouble()).toFloat()
+        return Array(DEPTH_ROWS) { r ->
+            val ra = ((r + 0.5f) / DEPTH_ROWS - 0.5f) * Settings.vfovRad
+            val a = pitch + ra
+            FloatArray(DEPTH_COLS) { c -> k / (hit(a, c) / cos(a) * cos(ra)) }
+        }
+    }
+
+    private fun DepthAnalyzer.seeFor(s: Array<FloatArray>, frames: Int, speed: Float = 0f, dropFrom: Float = 0f): Hazards {
+        var hz = Hazards()
+        repeat(frames) { i -> hz = analyze(s, pitchDeg, now = 1000L + i * 200, speedMps = speed) }
+        return hz
+    }
+
+    @Test fun kerbIsAStepDown() {
+        val an = DepthAnalyzer(); an.calibrate()
+        val hz = an.seeFor(scene { floor(it, extraDrop = 0.15f, dropAt = 1.6f) }, Settings.depthHits)
+        assertNotNull("15 cm kerb missed", hz.dropAtM)
+        assertEquals(1.6f, hz.dropAtM!!, 0.4f)
+        assert(hz.dropIsStep)
+        val big = DepthAnalyzer().also { it.calibrate() }.seeFor(scene { floor(it, extraDrop = 0.8f, dropAt = 1.8f) }, Settings.depthHits)
+        assert(!big.dropIsStep)
+    }
+
+    @Test fun narrowDarkPatchIsNotADrop() {
+        val an = DepthAnalyzer(); an.calibrate()
+        // Only 2 of the corridor columns look like a hole (a dark tile or a shadow).
+        val patch = sceneCols { a, c -> if (c in 14..15) floor(a, extraDrop = 0.8f, dropAt = 1.5f) else floor(a) }
+        assertNull(an.seeFor(patch, Settings.depthHits + 2).dropAtM)
+    }
+
+    @Test fun gradualDepthDriftIsNotAStep() {
+        val an = DepthAnalyzer(); an.calibrate()
+        // Depth model slowly over-estimating far floor (up to +25 % at 3 m): no sudden lip, not big.
+        val drift = scene { a -> val d = floor(a); if (d < 20f) d * (1f + 0.12f * (d - 1f).coerceAtLeast(0f)) else d }
+        assertNull(an.seeFor(drift, Settings.depthHits + 2).dropAtM)
+    }
+
+    @Test fun dropThatJumpsAroundIsNotConfirmed() {
+        val an = DepthAnalyzer(); an.calibrate()
+        var hz = Hazards()
+        repeat(Settings.depthHits * 2) { i ->
+            val at = if (i % 2 == 0) 1.6f else 3.0f // edge "moves" 1.4 m every frame: noise, not a real edge
+            hz = an.analyze(scene { floor(it, extraDrop = 0.8f, dropAt = at) }, pitchDeg, now = 1000L + i * 200)
+        }
+        assertNull(hz.dropAtM)
+    }
+
+    @Test fun realEdgeApproachingAtWalkingSpeedIsConfirmed() {
+        val an = DepthAnalyzer(); an.calibrate()
+        var hz = Hazards()
+        repeat(Settings.depthHits) { i ->
+            val at = 2.8f - i * 0.2f // walking 1 m/s, a frame every 200 ms
+            hz = an.analyze(scene { floor(it, extraDrop = 0.8f, dropAt = at) }, pitchDeg, now = 1000L + i * 200, speedMps = 1f)
+        }
+        assertNotNull(hz.dropAtM)
+    }
+
     @Test fun oneGlanceCannotSetTheRuler() {
         val an = DepthAnalyzer()
         an.analyze(scene { floor(it) }, pitchDeg)

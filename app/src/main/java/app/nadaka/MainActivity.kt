@@ -138,7 +138,11 @@ object Settings {
     var floorFlatness = 0.3f
     var dropMinM = 0.7f
     var dropMaxM = 3.5f
-    var dropRatio = 0.45f // floor >45% farther than a flat floor would be = it drops away
+    var dropRatio = 0.45f // floor >45% farther than a flat floor would be = a big drop
+    var stepRatio = 0.08f // >8% farther + a sharp lip = a step or kerb
+    var lipJump = 0.06f // how sudden the jump must be between neighbouring rows
+    var dropWidthFrac = 0.6f // share of the walking corridor that must drop
+    var dropTrackTolM = 0.6f // frame-to-frame distance must follow my walking within this
     var obstacleRatio = 0.25f
     var hazardRows = 3
     var depthHits = 4 // depth frames in a row before a drop/overhang is announced
@@ -381,7 +385,7 @@ class MainActivity : ComponentActivity() {
             val d0 = SystemClock.elapsedRealtime()
             // Drop-offs only matter while walking; at a desk the table top would be mistaken for the floor.
             val walking = activity.current == Activity.WALKING
-            hazards = withoutFurnitureFloor(depthAnalyzer.analyze(depth.run(frame), pitch, walking), tracks)
+            hazards = withoutFurnitureFloor(depthAnalyzer.analyze(depth.run(frame), pitch, walking, t2, motion.speed), tracks)
             depthMs = SystemClock.elapsedRealtime() - d0
         }
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }

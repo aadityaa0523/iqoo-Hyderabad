@@ -59,6 +59,7 @@ fun clock(bearingRad: Float): String {
 /** Depth-model hazards for this frame (Depth.kt). Null = not present. */
 data class Hazards(
     val dropAtM: Float? = null,
+    val dropIsStep: Boolean = false, // a single step / kerb rather than a big drop
     val overheadAtM: Float? = null,
     val overheadBearing: Float = 0f,
     val floorObstacleAtM: Float? = null,
@@ -130,7 +131,8 @@ class AlertPolicy {
 
         // Depth hazards: the things a cane can't find in time.
         hz.dropAtM?.takeIf { walking || it < closeRange }?.let {
-            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Stop. Drop.") }
+            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += if (hz.dropIsStep) Alert(phrase("Step down ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Step down.")
+                    else Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Stop. Drop.") }
         }
         hz.overheadAtM?.takeIf { walking || it < closeRange }?.let {
             if (now - lastOverheadMs >= Settings.hazardRepeatMs) {

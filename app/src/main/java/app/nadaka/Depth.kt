@@ -82,6 +82,8 @@ class DepthAnalyzer {
         private set
     private val pending = ArrayList<Float>() // candidate floor scales before the ruler is trusted
     private var dropHits = 0
+    private var lastDropM = Float.NaN
+    private var lastDropMs = 0L
     private var overheadHits = 0
     private var grid: Array<FloatArray>? = null
 
@@ -100,7 +102,7 @@ class DepthAnalyzer {
      * [walking]: only then is the near ground assumed to be the floor you walk on, and only then are
      * hazards reported. Distances (metresIn) still work when standing, using the trusted ruler.
      */
-    fun analyze(g: Array<FloatArray>, pitchDeg: Float, walking: Boolean = true): Hazards {
+    fun analyze(g: Array<FloatArray>, pitchDeg: Float, walking: Boolean = true, now: Long = 0L, speedMps: Float = 0f): Hazards {
         grid = g
         if (!walking || pitchDeg !in Settings.hazardPitchMinDeg..Settings.hazardPitchMaxDeg) return Hazards()
         val pitch = Math.toRadians(pitchDeg.toDouble()).toFloat()
@@ -132,23 +134,31 @@ class DepthAnalyzer {
         }
         if (scale.isNaN() || !floorOk) return Hazards() // honest: no trusted floor this frame, no depth claims
 
-        // 2. Drop-off / floor obstacle: walk up the corridor from near to far.
-        var drop: Float? = null
+        // 2. Drop-off: several independent cues must agree (see dropCandidate).
+        val cand = dropCandidate(g, pitch)
+        // 2d. Tracking: a real edge comes closer at my walking speed; depth noise jumps around.
+        val dt = (now - lastDropMs) / 1000f
+        val consistent = cand != null && !lastDropM.isNaN() &&
+            kotlin.math.abs(cand.first - (lastDropM - speedMps * dt)) < Settings.dropTrackTolM
+        dropHits = when {
+            cand == null -> 0
+            dropHits == 0 || consistent -> dropHits + 1
+            else -> 1 // jumped: start over
+        }
+        lastDropM = cand?.first ?: Float.NaN
+        lastDropMs = now
+
+        // Floor obstacle: walk up the corridor median from near to far.
         var obstacle: Float? = null
-        var farRun = 0
         var nearRun = 0
         for (r in DEPTH_ROWS - 1 downTo 0) {
             val zf = floorZ(r, pitch)
             if (zf.isNaN() || zf > Settings.dropMaxM) break
             if (zf < Settings.dropMinM || rowMed[r] <= 0f) continue
             val ratio = (scale / rowMed[r]) / zf
-            farRun = if (ratio > 1 + Settings.dropRatio) farRun + 1 else 0
             nearRun = if (ratio < 1 - Settings.obstacleRatio) nearRun + 1 else 0
-            if (farRun == Settings.hazardRows && drop == null) drop = zf
-            if (nearRun == Settings.hazardRows && obstacle == null) obstacle = scale / rowMed[r]
-            if (drop != null || obstacle != null) break // the nearest one matters
+            if (nearRun == Settings.hazardRows) { obstacle = scale / rowMed[r]; break }
         }
-        dropHits = if (drop != null) dropHits + 1 else 0
 
         // 3. Head height: a near point 1.2-2.1 m above the floor with nothing at body height beneath it.
         var overhead: Float? = null
@@ -174,11 +184,55 @@ class DepthAnalyzer {
         overheadHits = if (overhead != null) overheadHits + 1 else 0
 
         return Hazards(
-            dropAtM = drop?.takeIf { dropHits >= Settings.depthHits },
+            dropAtM = cand?.first?.takeIf { dropHits >= Settings.depthHits },
+            dropIsStep = cand?.second == true,
             overheadAtM = overhead?.takeIf { overheadHits >= Settings.depthHits },
             overheadBearing = if (cols > 0) bearingSum / cols else 0f,
             floorObstacleAtM = obstacle,
         )
+    }
+
+    /**
+     * One frame's drop-off evidence, per column of the walking corridor, returning (distance, isStep) or null.
+     *  a. the floor beyond some row looks farther than a flat floor would, for [Settings.hazardRows] rows;
+     *  b. WIDTH: most corridor columns agree (a dark tile, shadow or bag strap covers only a few);
+     *  c. LIP: the jump happens suddenly at one row (a real edge), not as a slow drift (depth-model error);
+     * then: big drop (>45 % farther) needs a+b; a step or kerb (>8 %) needs a+b+c.
+     */
+    private fun dropCandidate(g: Array<FloatArray>, pitch: Float): Pair<Float, Boolean>? {
+        val band = (DEPTH_COLS * 35 / 100) until (DEPTH_COLS * 65 / 100)
+        val dists = ArrayList<Float>()
+        val ratios = ArrayList<Float>()
+        var lips = 0
+        for (c in band) {
+            var run = 0
+            var start = -1
+            var prevRatio = Float.NaN
+            var lipHere = false
+            for (r in DEPTH_ROWS - 1 downTo 0) {
+                val zf = floorZ(r, pitch)
+                if (zf.isNaN() || zf > Settings.dropMaxM) break
+                if (zf < Settings.dropMinM || g[r][c] <= 0f) continue
+                val ratio = (scale / g[r][c]) / zf
+                if (ratio > 1 + Settings.stepRatio) {
+                    if (run == 0) { start = r; lipHere = !prevRatio.isNaN() && ratio - prevRatio >= Settings.lipJump }
+                    run++
+                    if (run == Settings.hazardRows) {
+                        dists += floorZ(start, pitch)
+                        ratios += (0 until run).map { (scale / g[start - it][c]) / floorZ(start - it, pitch) }.sorted()[run / 2]
+                        if (lipHere) lips++
+                        break
+                    }
+                } else run = 0
+                prevRatio = ratio
+            }
+        }
+        if (dists.size < kotlin.math.ceil(band.count() * Settings.dropWidthFrac).toInt()) return null // b
+        val ratio = median(ratios)
+        val lip = lips * 2 >= dists.size
+        val big = ratio > 1 + Settings.dropRatio
+        if (!big && !lip) return null // small and gradual: depth-model drift, not an edge
+        return median(dists) to !big
     }
 
     /** Median metric depth inside a box, or NaN. */
