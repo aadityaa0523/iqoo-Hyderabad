@@ -94,6 +94,7 @@ object Settings {
     // Voice questions (Voice.kt)
     var gemmaModelFile = "gemma-4-E2B-it.litertlm" // copied from Edge Gallery into Nadaka's files dir
     var gemmaImagePx = 512
+    var listenWindowMs = 8000L // after a press, wait this long for the user to start talking
     var voiceLanguage = "en-US" // the offline speech pack installed on the loaner phone
     var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
 

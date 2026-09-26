@@ -163,6 +163,9 @@ class VoiceInput(
     private var rec: SpeechRecognizer? = onDevice ?: system
     private var retried = false
     private var partial: String? = null
+    private var windowStartMs = 0L // when the user pressed: we keep listening for Settings.listenWindowMs
+    private var spoke = false      // the recognizer heard speech start in this window
+    private var restarting = false
 
     init {
         // Found on the loaner: the on-device English pack was missing ("language pack not installed"),
@@ -207,11 +210,28 @@ class VoiceInput(
         if (listening) { r.stopListening(); return }
         onDevice?.cancel(); system?.cancel() // never stack sessions
         partial = null
+        spoke = false
+        restarting = false
+        windowStartMs = android.os.SystemClock.elapsedRealtime()
         listening = true
         r.startListening(intent())
     }
 
-    override fun onReadyForSpeech(p: Bundle?) = onReady()
+    /**
+     * Measured on the loaner: the on-device recognizer closes the mic after ~2 s of silence and
+     * ignores the silence-length hints, so a short pause after the buzz ended every question.
+     * Until the user actually starts talking, silently reopen it for the whole listen window.
+     */
+    private fun keepWaiting(): Boolean {
+        val left = Settings.listenWindowMs - (android.os.SystemClock.elapsedRealtime() - windowStartMs)
+        if (spoke || left < 800) return false
+        restarting = true
+        listening = true
+        rec?.startListening(intent())
+        return true
+    }
+
+    override fun onReadyForSpeech(p: Bundle?) { if (!restarting) onReady() } // one cue per press
 
     override fun onPartialResults(b: Bundle?) {
         b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.takeIf { it.isNotBlank() }?.let { partial = it }
@@ -235,12 +255,14 @@ class VoiceInput(
             return
         }
         retried = false
+        val silent = error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+        if (silent && partial == null && keepWaiting()) return
         val p = partial
         if (p != null) onText(listOf(p)) // heard something before the error: use it
         else onFail(errorName(error))
     }
 
-    override fun onBeginningOfSpeech() = Unit
+    override fun onBeginningOfSpeech() { spoke = true }
     override fun onRmsChanged(v: Float) = Unit
     override fun onBufferReceived(b: ByteArray?) = Unit
     override fun onEndOfSpeech() = Unit
