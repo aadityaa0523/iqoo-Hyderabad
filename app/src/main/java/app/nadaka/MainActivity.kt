@@ -101,7 +101,10 @@ object Settings {
     var movingMps = 0.4f // a hazard seen this recently is still reported when asked "is it safe?"
 
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
-    var chatty = false
+    var chatty = false // true = static objects at any distance, not just within staticRangeM
+    var staticRangeM = 5f  // announce static objects within this range (once each)
+    var movingRangeM = 10f // announce moving objects within this range
+    var movingRepeatMs = 8000L
     var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
 
     // Activity modes (Activity.kt). vehicleVibration is a calibration knob: check it on a real bus.

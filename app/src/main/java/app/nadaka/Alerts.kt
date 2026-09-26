@@ -80,7 +80,8 @@ fun metres(m: Float): String {
 private fun phrase(vararg parts: String) = parts.filter { it.isNotEmpty() }.joinToString(", ") + "."
 
 /**
- * Decides what to say each frame: only what matters for safety, most urgent first, up to [Settings.maxAlerts]:
+ * Decides what to say each frame, most urgent first, up to [Settings.maxAlerts]; then awareness of
+ * moving things within 10 m and static things within 5 m, one at a time:
  * unusable camera > drop-off > head-height > approaching > close by > crowd > new obstacle.
  * Approaching and close-by are separate channels, so both are announced when both happen.
  * Handles flicker (min hits), nagging (habituation per track), and crowds. Pure logic, unit-tested.
@@ -97,6 +98,7 @@ class AlertPolicy {
     private var lastOverheadMs = -1_000_000L
     private var lastCrowdMs = -1_000_000L
     private val spokenHeight = HashMap<Int, Float>()
+    private val movingSaidMs = HashMap<Int, Long>()
 
     /** True while the camera has been unusable long enough that detections are not trusted. */
     val blind get() = health != Health.OK
@@ -158,16 +160,29 @@ class AlertPolicy {
         }
         if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
 
-        // Calm information (crowd summary, new far objects) only in chatty mode: the default is quiet.
-        if (!Settings.chatty || !walking || now - lastInfoMs < Settings.speechGapMs) return out
-        val crowd = stable.count { it.label == "person" } >= Settings.crowdCount
+        // Awareness, one message at a time: moving things within 10 m, static things within 5 m.
+        if (now - lastInfoMs < Settings.speechGapMs) return out
+        val known = stable.filter { !it.metres.isNaN() }
+        val crowd = known.count { it.label == "person" && it.metres <= Settings.movingRangeM } >= Settings.crowdCount
         if (crowd && now - lastCrowdMs > Settings.crowdRepeatMs) {
             lastCrowdMs = now; lastInfoMs = now
-            return listOf(Alert("Crowd ahead.", Buzz.AHEAD))
+            return listOf(Alert("Crowd ahead.", Buzz.AHEAD)) // instead of "person moving" x 6
         }
-        val t = stable.filter { it.sure && !(crowd && it.label == "person") }.maxByOrNull { it.box.height() } ?: return out
-        val said = spokenHeight[t.id]
-        if (said != null && t.box.height() < said * Settings.habituationGrowth) return out
+
+        known.filter {
+            it.moving && !it.edge && it.metres <= Settings.movingRangeM && !(crowd && it.label == "person") &&
+                now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
+        }.minByOrNull { it.metres }?.let {
+            movingSaidMs[it.id] = now; lastInfoMs = now
+            return listOf(Alert(phrase("${name(it)} moving", metres(it.metres), clock(it.bearing)), Buzz.SIDE))
+        }
+
+        if (!walking) return out // standing still: static things are not news
+        val range = if (Settings.chatty) Float.MAX_VALUE else Settings.staticRangeM
+        val t = known.filter {
+            it.sure && !it.moving && !it.edge && it.metres <= range && !(crowd && it.label == "person") &&
+                spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth }
+        }.minByOrNull { it.metres } ?: return out // once per object; again only once it looms 30% bigger
         spokenHeight[t.id] = t.box.height()
         lastInfoMs = now
         val c = clock(t.bearing)

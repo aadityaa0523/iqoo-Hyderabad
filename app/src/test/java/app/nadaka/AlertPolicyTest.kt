@@ -36,11 +36,23 @@ class AlertPolicyTest {
 
     private fun <T> chatty(block: () -> T): T { Settings.chatty = true; try { return block() } finally { Settings.chatty = false } }
 
-    @Test fun quietByDefault() {
+    @Test fun staticWithinFiveMetresOnce() {
         val p = AlertPolicy()
-        assertEquals(emptyList<String>(), p.say(listOf(track(1, metres = 3.1f)), 0)) // far: not news
-        assertEquals(emptyList<String>(), p.say(listOf(track(2, cx = 0.95f, metres = 1.2f)), 0)) // close but beside me
-        assertEquals(listOf("chair close, 1 metre, 12 o'clock."), p.say(listOf(track(3, metres = 1.2f)), 0)) // in my path
+        assertEquals(emptyList<String>(), p.say(listOf(track(1, metres = 6f)), 0)) // beyond 5 m: silent
+        assertEquals(listOf("chair, 3 metres, 12 o'clock."), p.say(listOf(track(2, metres = 3.1f)), 0))
+        assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 3f)), 10_000)) // already told
+        assertEquals(emptyList<String>(), p.say(listOf(track(3, cx = 0.95f, metres = 1.2f)), 20_000)) // half out of frame
+        assertEquals(listOf("chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(track(4, metres = 1.2f)), 0))
+    }
+
+    @Test fun movingWithinTenMetres() {
+        val walker = { m: Float -> track(1, "person", cx = 0.8f, metres = m).also { it.objSpeed = 1f; it.approaching = false } }
+        assertEquals(listOf("person moving, 8 metres, 1 o'clock."), AlertPolicy().say(listOf(walker(8f)), 0))
+        assertEquals(emptyList<String>(), AlertPolicy().say(listOf(walker(12f)), 0))
+        val p = AlertPolicy()
+        p.say(listOf(walker(8f)), 0)
+        assertEquals(0, p.say(listOf(walker(7f)), 3_000).size) // not every frame
+        assertEquals(1, p.say(listOf(walker(6f)), Settings.movingRepeatMs).size)
     }
 
     @Test fun standingOnlyCaresAboutWhatIsAtMe() {
