@@ -74,6 +74,19 @@ On-device speech recognition (offline English pack), keeps listening up to 8 s u
 answer is scanned and discarded if it contains a movement green-light ("path is clear", "you can go",
 "no obstacles"…).
 
+### Hearing, finding, emergency
+
+- **Danger sounds (360°):** YAMNet (521 sound classes) on the microphone: **horn, siren, vehicle reversing,
+  bicycle bell, dog barking** → long-short-long vibration + "Horn nearby." Paused while you ask a question
+  and inside vehicles.
+- **Find:** "find a chair", "where is my phone", "find a person" → "Chair, 2 o'clock, 3 metres" until it is
+  within reach ("right in front of you"). Things the detector doesn't know (a door) are located by Gemma.
+  "Stop" cancels.
+- **Emergency:** hold **both volume keys for 2 s** (or say "help me"): loud alarm, strong vibration, spoken
+  call for help with the battery level. Any volume key stops it.
+- **Voice-set modes:** "I'm sitting" (only warns about things coming at you), "I'm on the bus",
+  "let's go"; holds for 5 minutes.
+
 ### Reading (volume-down)
 
 On-device ML Kit OCR with voice coaching ("Move closer", "Hold still"); answers only after two matching
@@ -105,6 +118,7 @@ rings, a depth thumbnail, a hazard banner, and a caption of exactly what the use
 | YOLOX (int8, 640×640) | LiteRT + QNN delegate, Hexagon NPU | Qualcomm AI Hub, Apache-2.0 |
 | Depth Anything V2 (FP16, 518×518) | LiteRT + QNN delegate, Hexagon NPU | Qualcomm AI Hub (listed as MIT) |
 | Gemma 4 E2B (multimodal) | LiteRT-LM, GPU | Downloaded by Google AI Edge Gallery; Gemma terms |
+| YAMNet (sound events) | LiteRT, CPU | Google / TensorFlow, Apache-2.0 |
 | ML Kit Text Recognition (Latin, bundled) | On-device | Google ML Kit |
 | Speech recognition | Android on-device recognizer | Google (system) |
 
@@ -130,7 +144,7 @@ platform edges, heavy rain / fog.
 Requirements: Android Studio's JDK, Android SDK, an iQOO / Snapdragon 8-series phone (tested on SM8850, Android 16).
 
 ```bash
-./gradlew testDebugUnitTest      # 71 unit tests
+./gradlew testDebugUnitTest      # 78 unit tests
 ./gradlew installDebug           # or push to main: GitHub Actions publishes the APK as release "latest"
 ```
 
@@ -163,11 +177,13 @@ See [`training/README.md`](training/README.md).
 | `Voice.kt`, `Gemma.kt` | Speech recognition, intents, safety gate, local Gemma |
 | `Reader.kt` | PAY / MEDS OCR rules |
 | `Activity.kt`, `Thermal.kt` | Activity modes, thermal governor |
+| `Sounds.kt`, `Find.kt` | Danger sounds (YAMNet), find guidance, emergency |
 | `Hud.kt` | Sighted view |
 
-## Roadmap (written, not yet integrated)
+## Roadmap
 
-- Horn / siren / bicycle bell / reversing / dog-bark alerts from the microphone (YAMNet on the NPU): 360° awareness.
-- "Find a chair / my phone / a person" guidance.
-- Emergency gesture (hold both volume keys) with alarm and spoken call for help.
-- Voice-set modes: "I'm sitting", "I'm on the bus", "Let's go".
+- Blind-first screen gestures and spoken menu; first-run spoken tutorial; persistent settings.
+- Foreground service so it keeps running with the screen off.
+- Barometer check and one-tap mount calibration for drop-offs.
+- Object memory ("where did I leave my phone?").
+- CPU vs NPU benchmark screen; replay harness scoring real recorded walks.
