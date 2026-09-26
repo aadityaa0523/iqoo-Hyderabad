@@ -60,6 +60,8 @@ data class Hazards(
     val floorObstacleAtM: Float? = null,
 )
 
+private fun inPath(t: Track) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < Settings.pathHalfDeg
+
 /** "2.5 metres", "1 metre", "very close"; "" when unknown. */
 fun metres(m: Float): String {
     if (m.isNaN()) return ""
@@ -75,7 +77,7 @@ fun metres(m: Float): String {
 private fun phrase(vararg parts: String) = parts.filter { it.isNotEmpty() }.joinToString(", ") + "."
 
 /**
- * Decides what to say each frame, most urgent first, up to [Settings.maxAlerts] messages:
+ * Decides what to say each frame: only what matters for safety, most urgent first, up to [Settings.maxAlerts]:
  * unusable camera > drop-off > head-height > approaching > close by > crowd > new obstacle.
  * Approaching and close-by are separate channels, so both are announced when both happen.
  * Handles flicker (min hits), nagging (habituation per track), and crowds. Pure logic, unit-tested.
@@ -96,7 +98,7 @@ class AlertPolicy {
     /** True while the camera has been unusable long enough that detections are not trusted. */
     val blind get() = health != Health.OK
 
-    fun decide(tracks: List<Track>, raw: Health, now: Long, hz: Hazards = Hazards()): List<Alert> {
+    fun decide(tracks: List<Track>, raw: Health, now: Long, hz: Hazards = Hazards(), activity: Activity = Activity.WALKING): List<Alert> {
         // Camera health, with persistence so one dark frame doesn't cry wolf.
         if (raw != health) { health = raw; healthSince = now }
         if (health != Health.OK && now - healthSince >= Settings.healthPersistMs) {
@@ -108,14 +110,20 @@ class AlertPolicy {
         }
         if (health == Health.OK) healthSaid = Health.OK
 
+        // In a vehicle, motion fakes drop-offs and "approaching" objects: stay silent except camera health.
+        if (activity == Activity.VEHICLE) return emptyList()
+        val walking = activity == Activity.WALKING
+
         val out = ArrayList<Alert>()
         val stable = tracks.filter { it.hits >= Settings.minHits } // never trust one frame
+        // Standing still: only what is right at you. Walking: anything within the close range.
+        val closeRange = if (walking) Settings.closeM else Settings.veryCloseM + 0.25f
 
         // Depth hazards: the things a cane can't find in time.
-        hz.dropAtM?.let {
+        hz.dropAtM?.takeIf { walking || it < closeRange }?.let {
             if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN) }
         }
-        hz.overheadAtM?.let {
+        hz.overheadAtM?.takeIf { walking || it < closeRange }?.let {
             if (now - lastOverheadMs >= Settings.hazardRepeatMs) {
                 lastOverheadMs = now
                 out += Alert(phrase("Head height obstacle", metres(it), clock(hz.overheadBearing)), Buzz.WARN)
@@ -130,12 +138,15 @@ class AlertPolicy {
         }
 
         // Close by: repeats while close, even if already announced (it is a collision risk).
-        val close = stable.filter { it !== coming && it.metres < Settings.closeM }.minByOrNull { it.metres }
+        // Only things in my path, or practically touching me. A chair 1 m to the side is not news.
+        val close = stable.filter {
+            it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM)
+        }.minByOrNull { it.metres }
         if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
             lastCloseMs = now
             spokenHeight[close.id] = close.box.height()
             out += Alert(phrase("${close.label} close", metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
-        } else if (close == null && coming == null) {
+        } else if (close == null && coming == null && walking) {
             hz.floorObstacleAtM?.takeIf { it < Settings.closeM && now - lastCloseMs >= Settings.closeRepeatMs }?.let {
                 lastCloseMs = now
                 out += Alert(phrase("Obstacle ahead", metres(it)), Buzz.AHEAD) // something YOLO can't name (wall, pole)
@@ -143,8 +154,8 @@ class AlertPolicy {
         }
         if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
 
-        // Calm information: crowd summary, or one new obstacle with its distance.
-        if (now - lastInfoMs < Settings.speechGapMs) return out
+        // Calm information (crowd summary, new far objects) only in chatty mode: the default is quiet.
+        if (!Settings.chatty || !walking || now - lastInfoMs < Settings.speechGapMs) return out
         val crowd = stable.count { it.label == "person" } >= Settings.crowdCount
         if (crowd && now - lastCrowdMs > Settings.crowdRepeatMs) {
             lastCrowdMs = now; lastInfoMs = now

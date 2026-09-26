@@ -22,10 +22,14 @@ class EgoMotion(ctx: Context) : SensorEventListener {
     @Volatile private var yawRate = 0f
     @Volatile private var pitchRate = 0f
     @Volatile var gravity = floatArrayOf(0f, 9.8f, 0f) // device axes; upright portrait = +y
+    @Volatile var lastStepMs = 0L
+    /** Smoothed energy of acceleration without gravity: ~0.02 standing, high on a moving vehicle floor. */
+    @Volatile var vibration = 0f
     private val steps = ArrayDeque<Long>()
 
     fun start() {
         sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         sm.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
     }
@@ -40,7 +44,14 @@ class EgoMotion(ctx: Context) : SensorEventListener {
                 pitchRate = 0.7f * pitchRate + 0.3f * e.values[0]
             }
             Sensor.TYPE_GRAVITY -> gravity = e.values.copyOf()
-            Sensor.TYPE_STEP_DETECTOR -> synchronized(steps) { steps.addLast(SystemClock.elapsedRealtime()) }
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                val m2 = e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]
+                vibration += 0.05f * (m2 - vibration)
+            }
+            Sensor.TYPE_STEP_DETECTOR -> {
+                lastStepMs = SystemClock.elapsedRealtime()
+                synchronized(steps) { steps.addLast(lastStepMs) }
+            }
         }
     }
 

@@ -85,6 +85,15 @@ object Settings {
     var maxRollDeg = 30f
     var lowBatteryPct = 15
 
+    // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
+    var chatty = false
+    var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
+
+    // Activity modes (Activity.kt). vehicleVibration is a calibration knob: check it on a real bus.
+    var walkingStepMs = 2000L
+    var vehicleVibration = 0.25f
+    var activityGraceMs = 10000L
+
     // Speech (Alerts.kt)
     var maxAlerts = 2 // e.g. "person approaching" AND "chair close" in the same breath
     var closeM = 1.5f
@@ -127,6 +136,7 @@ class MainActivity : ComponentActivity() {
     private var depthMs = 0L
     private var depthFrames = 0
     private var said = "" // last sentence spoken, shown as the caption
+    private val activity = ActivityDetector() // analysis thread only
     private var camera: Camera? = null
     private var torchOn = false
     private var frameCount = 0
@@ -235,7 +245,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun analyze(image: ImageProxy) {
-        if (frameCount++ % frameStride != 0 && !reading) { image.close(); return }
+        // Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further.
+        val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.VEHICLE -> 4 }
+        if (frameCount++ % maxOf(frameStride, modeStride) != 0 && !reading) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
             val bmp = it.toBitmap()
@@ -266,7 +278,10 @@ class MainActivity : ComponentActivity() {
         val health = assess(luma, sharp, pitch, roll)
 
         // Depth on the NPU every Nth frame: drop-offs, head height, unnamed obstacles, and metres per object.
-        if (depthFrames++ % Settings.depthEvery == 0 && health == Health.OK) {
+        activity.update(t2, ego.lastStepMs, ego.vibration)?.let { feedback.say(it.spoken); said = it.spoken }
+        val depthOn = activity.current != Activity.VEHICLE // bus lurches fake drop-offs
+        if (!depthOn) hazards = Hazards()
+        if (depthOn && depthFrames++ % Settings.depthEvery == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
             hazards = depthAnalyzer.analyze(depth.run(frame), pitch)
             depthMs = SystemClock.elapsedRealtime() - d0
@@ -274,7 +289,7 @@ class MainActivity : ComponentActivity() {
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
         if (health == Health.DARK && !torchOn) { torchOn = true; camera?.cameraControl?.enableTorch(true) }
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
-        policy.decide(tracks, health, t2, hazards).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
+        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
         checkBattery(t2)
 
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
@@ -282,7 +297,7 @@ class MainActivity : ComponentActivity() {
         val rec = if (egoLog.recording) "REC${if (egoLog.label == 1) " +" else ""}" else ""
         Log.d(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}")
         val st = HudState(
-            backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
+            mode = activity.current.name, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             walkMps = motion.speed, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
         )

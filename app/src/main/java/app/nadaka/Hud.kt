@@ -118,7 +118,7 @@ class Hud(ctx: Context) : View(ctx) {
         c.drawText("Nadaka", 26 * dp, top + 27 * dp, text)
         text.color = Color.WHITE
         small.textSize = 11 * dp
-        c.drawText("%d fps  ·  walking %.1f m/s".format(s.fps, s.walkMps), 26 * dp, top + 47 * dp, small)
+        c.drawText("%d fps  ·  speed %.1f m/s".format(s.fps, s.walkMps), 26 * dp, top + 47 * dp, small)
 
         var x = width * 0.44f
         x = chip(c, x, top + 8 * dp, s.mode, amber)
