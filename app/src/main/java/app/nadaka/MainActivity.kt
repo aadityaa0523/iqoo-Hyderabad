@@ -60,8 +60,8 @@ object Settings {
     val vfovRad get() = zoomedFov(vfovDeg, zoom)
     var wideZoom = 0.6f
     var wideNearM = 2.0f // something this close (or half out of view) -> ultra-wide
-    var lensClearMs = 4000L // nothing close for this long -> main lens, to see far
-    var lensDwellMs = 3000L // minimum time between switches
+    var lensClearMs = 1000L // nothing close for this long -> main lens, to see far
+    var lensDwellMs = 1000L // minimum time between switches
     var yawSign = 1f // flip to -1 if boxes lose their track while turning
     var strideM = 0.7f // walk 10 m, count steps, stride = 10 / steps
     var stepWindowMs = 3000L
