@@ -9,6 +9,7 @@ enum class Activity(val spoken: String) {
     WALKING("Walking."),
     STILL("Standing. Quiet mode."),
     VEHICLE("In a vehicle. Hazard alerts paused."),
+    SITTING("Sitting. I'll only warn about things coming at you."), // set by voice only: sensors can't tell sitting from standing
 }
 
 /**
@@ -20,6 +21,13 @@ class ActivityDetector {
         private set
     private var candidate = Activity.WALKING
     private var candidateSince = 0L
+    private var stickyUntil = 0L
+
+    /** The user said which mode they are in: obey at once and ignore the sensors for a while. */
+    fun force(a: Activity, now: Long) {
+        current = a; candidate = a; candidateSince = now
+        stickyUntil = now + Settings.modeStickyMs
+    }
 
     /** [lastStepMs] = time of the last footstep; [vibration] = smoothed residual acceleration energy. Returns a mode change, or null. */
     fun update(now: Long, lastStepMs: Long, vibration: Float): Activity? {
@@ -28,6 +36,7 @@ class ActivityDetector {
             vibration >= Settings.vehicleVibration -> Activity.VEHICLE
             else -> Activity.STILL
         }
+        if (now < stickyUntil) return null // the user's word wins; "let's go" ends it
         if (guess != candidate) { candidate = guess; candidateSince = now }
         // Resuming walking is immediate (safety); calming down needs the grace period.
         val grace = if (guess == Activity.WALKING) 0L else Settings.activityGraceMs

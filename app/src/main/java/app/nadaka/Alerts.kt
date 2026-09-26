@@ -127,7 +127,8 @@ class AlertPolicy {
         val out = ArrayList<Alert>()
         val stable = tracks.filter { it.hits >= Settings.minHits } // never trust one frame
         // Standing still: only what is right at you. Walking: anything within the close range.
-        val closeRange = if (walking) Settings.closeM else Settings.veryCloseM + 0.25f
+        val sitting = activity == Activity.SITTING
+        val closeRange = if (walking) Settings.closeM else if (sitting) Settings.veryCloseM else Settings.veryCloseM + 0.25f
 
         // Depth hazards: the things a cane can't find in time.
         hz.dropAtM?.takeIf { walking || it < closeRange }?.let {
@@ -169,7 +170,7 @@ class AlertPolicy {
         if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
 
         // Awareness, one message at a time: moving things within 10 m, static things within 5 m.
-        if (now - lastInfoMs < Settings.speechGapMs) return out
+        if (sitting || now - lastInfoMs < Settings.speechGapMs) return out
         val known = stable.filter { !it.metres.isNaN() }
         val crowd = known.count { it.label == "person" && it.metres <= Settings.movingRangeM } >= Settings.crowdCount
         if (crowd && now - lastCrowdMs > Settings.crowdRepeatMs) {

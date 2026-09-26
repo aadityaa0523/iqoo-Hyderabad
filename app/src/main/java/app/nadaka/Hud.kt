@@ -162,7 +162,11 @@ class Hud(ctx: Context) : View(ctx) {
         else "On-device ${s.backend}  ·  detect ${s.detMs} ms  ·  depth ${s.depthMs} ms  ·  ${s.fps} fps"
         c.drawText(tech, 70 * dp, y + 42 * dp, body)
 
-        val modeLabel = when (s.mode) { "STILL" -> "STANDING"; "VEHICLE" -> "IN VEHICLE"; "READ" -> "READING"; else -> s.mode }
+        val modeLabel = when {
+            s.said == "EMERGENCY" -> "EMERGENCY"
+            s.said.startsWith("Finding") -> "FINDING"
+            else -> when (s.mode) { "STILL" -> "STANDING"; "VEHICLE" -> "IN VEHICLE"; "READ" -> "READING"; else -> s.mode }
+        }
         var right = width - 16 * dp
         right = pill(c, right, y + 2 * dp, modeLabel, amber, ink)
         if (s.rec.isNotEmpty()) pill(c, right, y + 2 * dp, s.rec, red, Color.WHITE)

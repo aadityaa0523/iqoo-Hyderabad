@@ -95,7 +95,7 @@ object Answers {
     }
 }
 
-enum class Ask { SAFETY, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
+enum class Ask { SAFETY, EMERGENCY, FIND, STOP, SIT, VEHICLE, WALK, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 /** Typical recognizer slips on short commands, normalised before matching. */
@@ -117,6 +117,12 @@ fun intentOf(text: String): Ask {
     val t = normalise(text)
     if (SafetyGate.isSafetyQuestion(t)) return Ask.SAFETY
     return when {
+        Regex("""\b(emergency|sos|help me|i need help|call for help|bachao)\b""").containsMatchIn(t) -> Ask.EMERGENCY
+        findTarget(t) != null -> Ask.FIND
+        Regex("""^(stop|cancel|stop looking|never mind)\b""").containsMatchIn(t) -> Ask.STOP
+        Regex("""\b(i'?m|i am|we'?re)\s+(sitting|seated)|\bsitting down\b""").containsMatchIn(t) -> Ask.SIT
+        Regex("""\b(i'?m|i am|we'?re)\s+(on|in)\s+(a |an |the )?(bus|car|auto|train|metro|cab|taxi|vehicle|rickshaw)""").containsMatchIn(t) -> Ask.VEHICLE
+        Regex("""\b(let'?s go|lets go|i'?m walking|i am walking|start walking|walking mode)\b""").containsMatchIn(t) -> Ask.WALK
         Regex("""\b(sign|signs|board|written|writing|label|poster|menu|text|what does (it|that|this) say)\b""").containsMatchIn(t) -> Ask.SIGN
         Regex("""\b(read|money|note|notes|rupee|rupees|medicine|tablet|strip|currency|cash|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
         Regex("""\b(teach|learn|lesson)\b|\bvibrations?\b.*\bmean""").containsMatchIn(t) -> Ask.LEARN
@@ -137,7 +143,7 @@ fun bestIntent(alternatives: List<String>): Pair<String, Ask> {
     return (alternatives.firstOrNull() ?: "") to Ask.HELP
 }
 
-const val HELP_TEXT = "You can ask: what's ahead, is it safe, read this, use speech, use vibration, or teach me the vibrations."
+const val HELP_TEXT = "You can ask: what's ahead, find a chair, read the sign, read this note, I'm sitting, let's go, or emergency."
 
 /** On-device speech recognition (no network). One utterance per [listen] call; main thread only. */
 /**

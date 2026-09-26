@@ -7,7 +7,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /** The haptic vocabulary (docs/haptics.md). Meaning is carried by rhythm; intensity only adds urgency. */
-enum class Tacton { DROP, HEAD, APPROACH, CANT_SEE, TICK }
+enum class Tacton { DROP, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
 
 /** Parking-sensor mapping: pulse interval for an obstacle at [m] metres in my path, or null = no pulse. */
 fun pulseIntervalMs(m: Float): Long? = when {
@@ -82,6 +82,8 @@ class Haptics(ctx: Context) {
         Tacton.HEAD -> wave(0 to 0, 80 to 70, 80 to 150, 120 to 255, 250 to 0, 80 to 70, 80 to 150, 120 to 255)
         // APPROACH: four short taps getting faster ("coming at you").
         Tacton.APPROACH -> wave(0 to 0, 60 to 255, 220 to 0, 60 to 255, 130 to 0, 60 to 255, 60 to 0, 60 to 255)
+        // SOUND: long-short-long ("heard something dangerous around you").
+        Tacton.SOUND -> wave(0 to 0, 300 to 230, 150 to 0, 80 to 230, 150 to 0, 300 to 230)
         // CAN'T SEE: two gentle medium pulses, calm.
         Tacton.CANT_SEE -> wave(0 to 0, 180 to 120, 300 to 0, 180 to 120)
         Tacton.TICK -> VibrationEffect.createOneShot(Settings.tickMs, amp(0.85f))
@@ -100,5 +102,6 @@ val LESSON = listOf(
     "Three heavy pulses: stop, drop-off." to Tacton.DROP,
     "Two rising swells: something at head height." to Tacton.HEAD,
     "Four quick taps, getting faster: something is coming at you." to Tacton.APPROACH,
+    "Long, short, long: I hear a horn, siren or barking dog around you." to Tacton.SOUND,
     "Two soft pulses: I can't see, use your cane." to Tacton.CANT_SEE,
 )

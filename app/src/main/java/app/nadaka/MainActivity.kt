@@ -95,6 +95,12 @@ object Settings {
     var gemmaModelFile = "gemma-4-E2B-it.litertlm" // copied from Edge Gallery into Nadaka's files dir
     var gemmaImagePx = 512
     var listenWindowMs = 8000L // after a press, wait this long for the user to start talking
+    var soundMinScore = 0.35f // YAMNet score for horn / siren / bell / reversing / bark
+    var soundRepeatMs = 8000L
+    var findRepeatMs = 3000L
+    var findTimeoutMs = 45000L
+    var modeStickyMs = 300000L // a mode set by voice holds for 5 minutes (or until "let's go")
+    var emergencyHoldMs = 2000L
     var voiceLanguage = "en-US" // the offline speech pack installed on the loaner phone
     var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
 
@@ -181,6 +187,13 @@ class MainActivity : ComponentActivity() {
     @Volatile private var latestHazards = Hazards()
     private lateinit var voice: VoiceInput
     private lateinit var gemma: Gemma
+    private lateinit var sounds: SoundWatch
+    private lateinit var emergency: Emergency
+    @Volatile private var finder: Finder? = null
+    private val keysDown = HashSet<Int>()
+    private var chord = false
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    private val emergencyHold = Runnable { startEmergency() }
     @Volatile private var latestFrame: Bitmap? = null
     private var camera: Camera? = null
     private var torchOn = false
@@ -218,6 +231,8 @@ class MainActivity : ComponentActivity() {
         else registerForActivityResult(RequestMultiplePermissions()) { if (it[CAMERA] == true) startCamera() }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
         gemma = Gemma(this).also { it.load() }
+        emergency = Emergency(this)
+        sounds = SoundWatch(this, paused = { voice.listening || emergency.active }) { d -> runOnUiThread { heard(d) } }
         voice = VoiceInput(this, onReady = { feedback.readyCue() }, onText = ::answer) { why ->
             Log.i(TAG, "voice failed: $why")
             feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
@@ -225,9 +240,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); ego.start() }
+    override fun onResume() {
+        super.onResume()
+        ego.start()
+        if (checkSelfPermission(RECORD_AUDIO) == PERMISSION_GRANTED) sounds.start()
+    }
 
-    override fun onPause() { ego.stop(); super.onPause() }
+    override fun onPause() { ego.stop(); sounds.stop(); super.onPause() }
 
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
@@ -260,19 +279,51 @@ class MainActivity : ComponentActivity() {
 
     // ponytail: volume-down starts READ; hold-to-switch and voice commands come in M5.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyDown(keyCode, event)
+        if (event.repeatCount == 0) keysDown += keyCode
+        if (keysDown.size == 2 && !chord) { chord = true; main.postDelayed(emergencyHold, Settings.emergencyHoldMs) }
+        return true
+    }
+
+    /** Single presses act on release; holding both keys for 2 s is the emergency gesture. */
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyUp(keyCode, event)
+        keysDown -= keyCode
+        main.removeCallbacks(emergencyHold)
+        if (chord) { if (keysDown.isEmpty()) chord = false; return true }
+        if (emergency.active) { emergency.stop(); feedback.say("Alarm stopped."); return true }
+        singlePress(keyCode, event)
+        return true
+    }
+
+    private fun startEmergency() {
+        emergency.start()
+        said = "EMERGENCY"
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val pct = b?.let { it.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) * 100 / it.getIntExtra(BatteryManager.EXTRA_SCALE, 100) }
+        main.postDelayed({ if (emergency.active) feedback.say("Emergency. I need help. Battery $pct percent. Press a volume key to stop the alarm.") }, 1500)
+    }
+
+    /** Horn, siren, bell, reversing, barking: vibration pattern plus two words. */
+    private fun heard(d: Danger) {
+        if (voice.listening || activity.current == Activity.VEHICLE) return // inside a vehicle, horns are constant
+        feedback.play(listOf(Alert(d.spoken, Buzz.WARN, Tacton.SOUND, d.spoken)))
+        said = "Heard: ${d.spoken}"
+        saidLevel = Buzz.WARN
+    }
+
+    private fun singlePress(keyCode: Int, event: KeyEvent) {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
             if (egoLog.recording) analysisThread.execute { // label toggle while recording training data
                 egoLog.label = 1 - egoLog.label
                 feedback.say(if (egoLog.label == 1) "Approaching." else "Clear.")
-            } else if (voice.available) { if (event.repeatCount == 0) { feedback.hush(); voice.press() } } // ask; press again = done
+            } else if (voice.available) { feedback.hush(); voice.press() } // ask; press again = done
             else feedback.say("Voice questions are not available on this phone.")
-            return true
+            return
         }
-        if (keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyDown(keyCode, event)
         analysisThread.execute {
             if (!reading) { reader.start(); reading = true; feedback.say("Reading.") }
         }
-        return true
     }
 
     /** Headroom is rate-limited by the OS; battery temperature changes slowly. Poll every 2 s. */
@@ -290,6 +341,18 @@ class MainActivity : ComponentActivity() {
         Log.i(TAG, "asked: $alternatives -> $ask")
         val reply = when (ask) {
             Ask.SAFETY -> Answers.safety(memory.recent())
+            Ask.EMERGENCY -> { startEmergency(); return }
+            Ask.FIND -> {
+                val (what, label) = findTarget(text)!!
+                if (label != null) { finder = Finder(label, SystemClock.elapsedRealtime()); "Looking for the $what. Turn slowly." }
+                else if (askGemma("Where is the $what? Answer with its clock direction and rough distance in metres, or say it is not visible.",
+                        fallback = "I can't see a $what.")) return
+                else "I can only find everyday objects like chairs, people, bottles or bags."
+            }
+            Ask.STOP -> { finder = null; "Stopped." }
+            Ask.SIT -> { analysisThread.execute { activity.force(Activity.SITTING, SystemClock.elapsedRealtime()) }; Activity.SITTING.spoken }
+            Ask.VEHICLE -> { analysisThread.execute { activity.force(Activity.VEHICLE, SystemClock.elapsedRealtime()) }; Activity.VEHICLE.spoken }
+            Ask.WALK -> { analysisThread.execute { activity.force(Activity.WALKING, SystemClock.elapsedRealtime()) }; "Walking. Full guidance." }
             Ask.DESCRIBE -> {
                 val facts = Answers.describe(latestTracks, latestHazards)
                 if (askGemma(Gemma.describePrompt(if (facts.startsWith("I don't")) "" else facts), fallback = facts)) return
@@ -345,7 +408,7 @@ class MainActivity : ComponentActivity() {
 
     private fun analyze(image: ImageProxy) {
         // Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further.
-        val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.VEHICLE -> 4 }
+        val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.SITTING -> 3; Activity.VEHICLE -> 4 }
         if (frameCount++ % maxOf(heat.tier.detectEvery, modeStride) != 0 && !reading) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
@@ -379,7 +442,7 @@ class MainActivity : ComponentActivity() {
 
         // Depth on the NPU every Nth frame: drop-offs, head height, unnamed obstacles, and metres per object.
         activity.update(t2, ego.lastStepMs, ego.vibration)?.let { feedback.say(it.spoken); said = it.spoken }
-        val depthOn = activity.current != Activity.VEHICLE // bus lurches fake drop-offs
+        val depthOn = activity.current != Activity.VEHICLE && activity.current != Activity.SITTING // bus lurches fake drop-offs
         if (!depthOn) hazards = Hazards()
         if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
@@ -394,7 +457,11 @@ class MainActivity : ComponentActivity() {
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
         latestHazards = hazards
-        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() && !voice.listening }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+        finder?.let { f ->
+            f.update(t2, tracks)?.let { if (!voice.listening) { feedback.say(it); said = "Finding: $it" } }
+            if (f.done) finder = null
+        }
+        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() && !voice.listening && finder == null }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
         // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
         if (activity.current == Activity.WALKING && !policy.blind && !voice.listening) { // ticks only while walking
