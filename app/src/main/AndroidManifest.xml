@@ -22,6 +22,9 @@
         <!-- LiteRT-LM GPU backend for Gemma. -->
         <uses-native-library android:name="libvndksupport.so" android:required="false" />
 
+        <!-- Benchmark: adb shell am start -n app.nadaka/.BenchActivity (no camera, nothing else competing for the NPU). -->
+        <activity android:name=".BenchActivity" android:exported="true" android:screenOrientation="portrait" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

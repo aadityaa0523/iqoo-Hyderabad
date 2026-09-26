@@ -20,7 +20,7 @@ const val DEPTH_COLS = 32
  * Output is relative inverse depth ("disparity": bigger = closer), pooled to a 48x32 grid.
  * Single-threaded (analysis thread).
  */
-class DepthModel(ctx: Context) {
+class DepthModel(ctx: Context, only: Backend? = null) {
     private val interpreter: Interpreter
     val backend: String
     private val size: Int
@@ -28,31 +28,45 @@ class DepthModel(ctx: Context) {
     private val output: ByteBuffer
     private val pixels: IntArray
     private val raw: FloatArray
+    private val rgbF: FloatArray
+    private val delegate: AutoCloseable?
+    var preMs = 0.0; var inferMs = 0.0; var postMs = 0.0
+    val initMs: Double
 
     init {
         val fd = ctx.assets.openFd("depth.tflite")
         val model = FileInputStream(fd.fileDescriptor).channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-        val (i, b) = openInterpreter(ctx, model, fp16 = true)
-        interpreter = i
-        backend = b
+        val t0 = System.nanoTime()
+        val o = openInterpreter(ctx, model, fp16 = true, token = "depth_anything_v2_fp32_aihub_v0.63.0_htpfp16", only = only)
+        interpreter = o.interpreter
+        backend = o.backend
+        delegate = o.delegate
+        initMs = (System.nanoTime() - t0) / 1e6
         size = interpreter.getInputTensor(0).shape()[1]
         input = ByteBuffer.allocateDirect(size * size * 3 * 4).order(ByteOrder.nativeOrder())
         output = ByteBuffer.allocateDirect(interpreter.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
         pixels = IntArray(size * size)
         raw = FloatArray(size * size)
+        rgbF = FloatArray(size * size * 3)
         Log.i(TAG, "depth on $backend, input ${size}x$size")
     }
 
     /** Disparity grid [row][col], rows top->bottom of the (upright) frame. */
+    fun close() { interpreter.close(); runCatching { delegate?.close() } }
+
     fun run(frame: Bitmap): Array<FloatArray> {
+        val t0 = System.nanoTime()
         Bitmap.createScaledBitmap(frame, size, size, true).getPixels(pixels, 0, size, 0, 0, size, size)
+        // Plain array + one bulk copy (per-element FloatBuffer.put was ~0.8 M calls a frame).
+        var k = 0
+        val inv = 1f / 255f
+        for (p in pixels) { rgbF[k++] = (p shr 16 and 0xFF) * inv; rgbF[k++] = (p shr 8 and 0xFF) * inv; rgbF[k++] = (p and 0xFF) * inv }
         input.rewind()
-        val f = input.asFloatBuffer()
-        for (p in pixels) {
-            f.put((p shr 16 and 0xFF) / 255f); f.put((p shr 8 and 0xFF) / 255f); f.put((p and 0xFF) / 255f)
-        }
+        input.asFloatBuffer().put(rgbF)
         output.rewind()
+        val t1 = System.nanoTime()
         interpreter.run(input, output)
+        val t2 = System.nanoTime()
         output.rewind()
         output.asFloatBuffer().get(raw)
         return Array(DEPTH_ROWS) { r ->
@@ -63,6 +77,9 @@ class DepthModel(ctx: Context) {
                 for (y in y0 until y1) for (x in x0 until x1) s += raw[y * size + x]
                 s / ((y1 - y0) * (x1 - x0))
             }
+        }.also {
+            val t3 = System.nanoTime()
+            preMs = (t1 - t0) / 1e6; inferMs = (t2 - t1) / 1e6; postMs = (t3 - t2) / 1e6
         }
     }
 }

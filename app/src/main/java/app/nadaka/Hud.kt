@@ -177,10 +177,10 @@ class Hud(ctx: Context) : View(ctx) {
         bold.textSize = 24 * dp * ts
         c.drawText("Nadaka", 56 * dp, y + 22 * dp, bold)
         body.textSize = 12 * dp * ts
-        fill.color = if (s.backend == "NPU" || s.backend.isEmpty()) green else orange
+        fill.color = if (s.backend == "HTP" || s.backend.isEmpty()) green else orange
         c.drawCircle(60 * dp, y + 38 * dp, 3.5f * dp, fill)
         val tech = if (s.backend.isEmpty()) "Reading, on-device"
-        else "${s.backend}  ·  detect ${s.detMs} ms  ·  depth ${s.depthMs} ms  ·  ${s.fps} fps  ·  ${if (s.lens < 1f) "0.6×" else "1×"} lens"
+        else "YOLO ${s.backend} ${s.detMs} ms · Depth ${s.depthBackend} ${s.depthMs} ms · ${s.fps} fps · ${if (s.lens < 1f) "0.6×" else "1×"}"
         c.drawText(tech, 70 * dp, y + 42 * dp, body)
 
         val modeLabel = when {
