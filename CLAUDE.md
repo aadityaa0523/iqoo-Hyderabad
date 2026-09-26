@@ -3,7 +3,7 @@
 - Android, Kotlin, plain Views (no Compose), CameraX, LiteRT. minSdk 31, compileSdk 36.
 - Runs fully offline. No network calls at runtime.
 - Modes: WALK (obstacles, drop-offs, head height), PAY (currency notes), MEDS (medicine strips).
-- Detector: `assets/detect.tflite` = EfficientDet-Lite0 (uint8 320x320 input; outputs boxes [ymin,xmin,ymax,xmax], classes, scores, count). Labels in `assets/labels.txt` (COCO, "???" = unused id).
+- Detector: `assets/detect.tflite` = YOLOX int8 from Qualcomm AI Hub (Apache-2.0), uint8 640x640 input; outputs boxes [x1,y1,x2,y2] px, scores, class_idx (uint8, dequantised in code), NMS in Detector.kt. Labels: `assets/labels.txt` (80 COCO).
 - Inference order: QNN (NPU) delegate, then GPU, then CPU. Always show which one loaded.
 - Decisions are deterministic rules. Never guess a medicine or a note: low confidence -> "Can't read clearly".
 - All thresholds live in the `Settings` object (MainActivity.kt).
