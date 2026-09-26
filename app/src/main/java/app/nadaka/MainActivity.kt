@@ -59,6 +59,9 @@ object Settings {
     val hfovRad get() = zoomedFov(hfovDeg, zoom)
     val vfovRad get() = zoomedFov(vfovDeg, zoom)
     var wideZoom = 0.6f
+    var autoLens = false // switching lenses reset the depth ruler and tracking every few seconds: off, main lens only
+    var maxPriorM = 10f   // size-based distance beyond this is noise, not a measurement
+    var maxDepthM = 10f   // depth-ruler distance beyond this is extrapolation (= the moving-object alert range)
     var wideNearM = 2.0f // something this close (or half out of view) -> ultra-wide
     var lensClearMs = 1000L // nothing close for this long -> main lens, to see far
     var lensDwellMs = 1000L // minimum time between switches
@@ -98,6 +101,15 @@ object Settings {
 
     // Voice questions (Voice.kt)
     var gemmaModelFile = "gemma-4-E2B-it.litertlm" // copied from Edge Gallery into Nadaka's files dir
+    // Qwen3-VL-2B via llama.cpp: preferred when its files are in files/qwen/, else Gemma.
+    var useQwen = true
+    var qwenModelFile = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+    var qwenMmprojFile = "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
+    var qwenPort = 8089
+    var qwenDevice = "HTP0" // Hexagon NPU: image 0.25 s, answer ~2 s (GPU 14-17 s, CPU 33 s just to encode the image)
+    var qwenImageTokens = 256 // cap; the full-resolution photo otherwise becomes thousands of tokens
+    var qwenMaxTokens = 48 // short answers; also caps worst-case latency
+    var qwenContext = 1024
     var gemmaImagePx = 1024 // Gemma sees the full preview, not the 640x480 analysis frame
     var listenWindowMs = 8000L // after a press, wait this long for the user to start talking
     var soundMinScore = 0.35f // YAMNet score for horn / siren / bell / reversing / bark
@@ -144,6 +156,10 @@ object Settings {
 
     // Depth (Depth.kt). cameraHeightM is THE calibration knob: measure lens height on the wearer.
     var depthEvery = 2 // run the depth model every Nth analysed frame
+    var fpsWalking = 10
+    var fpsStill = 5
+    var fpsSitting = 3
+    var fpsVehicle = 2
     var cameraHeightM = 1.3f
     var floorCalMinM = 0.8f
     var floorCalMaxM = 2.0f
@@ -213,7 +229,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var latestTracks = emptyList<Track>()
     @Volatile private var latestHazards = Hazards()
     private lateinit var voice: VoiceInput
-    private lateinit var gemma: Gemma
+    private lateinit var gemma: Vlm // Qwen3-VL (llama.cpp) or Gemma 4 (LiteRT-LM)
     private lateinit var sounds: SoundWatch
     private lateinit var emergency: Emergency
     @Volatile private var finder: Finder? = null
@@ -271,7 +287,7 @@ class MainActivity : ComponentActivity() {
             if (it[CAMERA] == true) startCamera() else screen.cameraError("Camera permission is off.")
         }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
-        gemma = Gemma(this).also { it.load() }
+        gemma = (Qwen(this).takeIf { Settings.useQwen && it.installed } ?: Gemma(this)).also { it.load() }
         emergency = Emergency(this)
         sounds = SoundWatch(this, paused = { voice.listening || emergency.active }) { d -> runOnUiThread { heard(d) } }
         feedback.listening = { voice.listening }
@@ -300,6 +316,8 @@ class MainActivity : ComponentActivity() {
         if (checkSelfPermission(RECORD_AUDIO) == PERMISSION_GRANTED) sounds.start()
     }
 
+    override fun onDestroy() { (gemma as? Qwen)?.stop(); super.onDestroy() }
+
     override fun onPause() { ego.stop(); sensors.unregisterListener(baroListener); sounds.stop(); wide?.stop(); super.onPause() }
 
     /**
@@ -310,18 +328,17 @@ class MainActivity : ComponentActivity() {
         val id = wideId
         val tv = preview as? android.view.TextureView
         if (id != null && tv != null) {
-            wide = WideCamera(this, id, tv, analysisThread, onFrame = ::onWideFrame) { why ->
+            wide = WideCamera(this, id, tv, analysisThread, onFrame = ::onWideFrame, take = ::frameDue, onFail = { why ->
                 Log.w(TAG, "lens: logical camera failed ($why)")
                 runOnUiThread { feedback.say("Camera problem. Restart the app.") }
                 screen.cameraError("The camera could not open.")
-            }.also { minZoom = it.minZoom; if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) it.start() } // else onResume starts it
+            }).also { minZoom = it.minZoom; if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) it.start() } // else onResume starts it
             return
         }
         startCameraX()
     }
 
     private fun onWideFrame(frame: Bitmap) {
-        if (skipFrame()) return
         safely { process(frame, SystemClock.elapsedRealtime()) }
     }
 
@@ -497,7 +514,7 @@ class MainActivity : ComponentActivity() {
 
     /** Ultra-wide for close quarters, main lens for far awareness and reading (Lens.kt). */
     private fun chooseLens(now: Long, tracks: List<Track>) {
-        if (minZoom >= 1f) return // no ultra-wide on this phone
+        if (minZoom >= 1f || !Settings.autoLens) return // no ultra-wide on this phone, or auto-switching off
         val trusted = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() }
         val change = lens.update(
             now, reading = reading, walking = activity.current == Activity.WALKING, finding = finder != null,
@@ -521,15 +538,26 @@ class MainActivity : ComponentActivity() {
         if (pct <= Settings.lowBatteryPct) { batterySaid = true; feedback.say("Battery $pct percent. Charge soon.", strong = true) }
     }
 
-    /** Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further. */
-    private fun skipFrame(): Boolean {
-        val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.SITTING -> 3; Activity.VEHICLE -> 4 }
-        return frameCount++ % maxOf(heat.tier.detectEvery, modeStride) != 0 && !reading
+    /**
+     * Work less when it matters less, by time (the camera runs at 30 fps; analysing all of it only makes heat):
+     * walking 10 fps, standing 5, sitting 3, vehicle 2; a hot phone slows further. Reading gets full speed.
+     * Asked before the frame is converted, so a skipped frame costs nothing.
+     */
+    @Volatile private var lastTakenMs = 0L
+    private fun frameDue(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val fps = if (reading) Settings.fpsWalking else when (activity.current) {
+            Activity.WALKING -> Settings.fpsWalking; Activity.STILL -> Settings.fpsStill
+            Activity.SITTING -> Settings.fpsSitting; Activity.VEHICLE -> Settings.fpsVehicle
+        }
+        if (now - lastTakenMs < 1000L * heat.tier.detectEvery / fps) return false
+        lastTakenMs = now
+        return true
     }
 
     /** CameraX fallback path. */
     private fun analyze(image: ImageProxy) {
-        if (skipFrame()) { image.close(); return }
+        if (!frameDue()) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
             val bmp = it.toBitmap()
@@ -570,7 +598,7 @@ class MainActivity : ComponentActivity() {
         val health = assess(luma, sharp, pitch, roll)
 
         // Depth on the NPU every Nth frame: drop-offs, head height, unnamed obstacles, and metres per object.
-        activity.update(t2, ego.lastStepMs, ego.vibration)?.let { feedback.say(it.spoken); said = it.spoken }
+        activity.update(t2, ego.lastStepMs, ego.vibration) // only throttles detection; not announced
         val depthOn = activity.current != Activity.VEHICLE && activity.current != Activity.SITTING // bus lurches fake drop-offs
         if (!depthOn) hazards = Hazards()
         if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
@@ -634,7 +662,7 @@ class MainActivity : ComponentActivity() {
             mode = activity.current.name, heat = heat.tier, lens = Settings.zoom, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), drop = dropNow, imgW = frame.width, imgH = frame.height,
-            loading = false, sensorError = if (motionMissing) "No motion sensor." else null,
+            loading = false, floorTrusted = depthAnalyzer.floorTrusted, sensorError = if (motionMissing) "No motion sensor." else null,
             baroHPa = if (pressure == null) Float.NaN else drop.barometer.filteredPressure, atMs = t2,
         )
         screen.post(st)

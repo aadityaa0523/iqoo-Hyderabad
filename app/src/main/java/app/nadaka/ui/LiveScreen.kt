@@ -108,7 +108,6 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
             override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, t.px(Theme.RADIUS))
         }
         hero.addOnLayoutChangeListener { _, l, tp, r, b, _, _, _, _ -> coverFrame(r - l, b - tp) }
-        hero.setOnClickListener { cycleHero() }
         hero.setOnLongClickListener { actions.recordToggle(); true }
 
         card.orientation = LinearLayout.HORIZONTAL
@@ -246,10 +245,10 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
         status.contentDescription = "${sf.status.lowercase()}${if (heat.isNotEmpty()) ", phone ${s.heat.name.lowercase()}" else ""}"
 
         // Hero badge + description
-        setIfChanged(heroBadge, Prefs.heroMode.label.uppercase())
+        setIfChanged(heroBadge, null) // one view only now
         val edge = s.drop?.candidate != null && s.drop.state.let { it == app.nadaka.drop.DropState.POSSIBLE_DROP || it == app.nadaka.drop.DropState.CONFIRMED_DROP }
         hero.contentDescription = (if (edge) "Depth map showing a detected floor edge." else "Live ${Prefs.heroMode.label.lowercase()} view.") +
-            " Double tap to change view."
+            ""
 
         renderObjects(s, sf)
         renderCard(sf)

@@ -47,6 +47,7 @@ class WideCamera(
     private val analysis: Executor,
     private val onFrame: (Bitmap) -> Unit,
     private val onFail: (String) -> Unit,
+    private val take: () -> Boolean = { true }, // frame-rate gate, asked before any conversion work
 ) {
     private val cm = ctx.getSystemService(CameraManager::class.java)
     private val chars = cm.getCameraCharacteristics(id)
@@ -128,7 +129,7 @@ class WideCamera(
 
     private fun onImage(r: ImageReader) {
         val img = r.acquireLatestImage() ?: return
-        if (busy) { img.close(); return } // analysis still working on the last one: drop
+        if (busy || !take()) { img.close(); return } // still analysing, or not due yet: drop before converting
         busy = true
         val bmp = try { yuvToUpright(img) } finally { img.close() }
         analysis.execute { try { onFrame(bmp) } finally { busy = false } }

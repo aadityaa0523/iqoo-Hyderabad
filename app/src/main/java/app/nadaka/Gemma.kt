@@ -23,17 +23,17 @@ import java.util.concurrent.Executors
  * every Gemma answer is scanned for movement green-lights (SafetyGate.greenLight) before it is spoken.
  * Money and medicine stay on deterministic OCR rules (Reader.kt).
  */
-class Gemma(private val ctx: Context) {
+class Gemma(private val ctx: Context) : Vlm {
     private val worker = Executors.newSingleThreadExecutor()
     private var engine: Engine? = null
-    @Volatile var status = "not loaded"
+    @Volatile override var status = "not loaded"
         private set
-    val ready get() = engine != null
+    override val ready get() = engine != null
 
     private val modelFile get() = File(ctx.getExternalFilesDir(null), Settings.gemmaModelFile)
 
     /** Loads in the background (a few seconds; the GPU program cache makes later launches faster). */
-    fun load() = worker.execute {
+    override fun load() = worker.execute {
         val f = modelFile
         if (!f.exists()) { status = "model not found at ${f.path}"; Log.w(TAG, "gemma: $status"); return@execute }
         try {
@@ -59,7 +59,7 @@ class Gemma(private val ctx: Context) {
     }
 
     /** One question about [image] (may be null). [onAnswer] gets null when Gemma can't answer. Runs on the Gemma thread. */
-    fun ask(prompt: String, image: Bitmap?, onAnswer: (String?) -> Unit) = worker.execute {
+    override fun ask(prompt: String, image: Bitmap?, onAnswer: (String?) -> Unit) = worker.execute {
         val e = engine ?: return@execute onAnswer(null)
         try {
             val t0 = System.currentTimeMillis()

@@ -26,6 +26,8 @@ enum class HeroMode(val label: String) { BLEND("Depth + camera"), DEPTH("Depth")
  * Annotations are words + thick shapes: FLOOR, DROP EDGE, LOWER LEVEL, head height, objects.
  */
 class HeroView(ctx: Context) : View(ctx) {
+    companion object { const val SHOW_DEPTH = false } // the contour bands read as moving "waves": camera only
+
     private var s = HudState()
     private var safety = safetyOf(s)
     private var t = Theme(ctx)
@@ -56,7 +58,7 @@ class HeroView(ctx: Context) : View(ctx) {
         val w = width.toFloat(); val h = height.toFloat()
         if (w <= 0f) return
         val mode = Prefs.heroMode
-        if (mode != HeroMode.CAMERA) s.depth?.let { g ->
+        if (SHOW_DEPTH && mode != HeroMode.CAMERA) s.depth?.let { g ->
             buildDepth(g)
             bmpPaint.alpha = if (mode == HeroMode.DEPTH || Prefs.camera == app.nadaka.CameraView.HIDDEN) 255 else 150
             c.drawBitmap(depthBmp, null, Rect(0, 0, width, height), bmpPaint)
@@ -118,7 +120,7 @@ class HeroView(ctx: Context) : View(ctx) {
 
     private fun drawFloor(c: Canvas, w: Float, h: Float) {
         val d = s.drop ?: return
-        if (d.evidence.evidenceClass != EvidenceClass.NONE && d.state != DropState.SAFE) return // the edge speaks instead
+        if (!s.floorTrusted || d.state != DropState.SAFE) return // only a floor we actually measured; else the edge speaks
         val top = h * d.groundRoiTop
         val p = Path().apply { moveTo(w * 0.36f, top); lineTo(w * 0.64f, top); lineTo(w * 0.8f, h * 0.97f); lineTo(w * 0.2f, h * 0.97f); close() }
         line.color = (t.accent and 0x00FFFFFF) or (0xB0 shl 24)

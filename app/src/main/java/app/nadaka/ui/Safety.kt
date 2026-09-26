@@ -88,7 +88,7 @@ fun safetyOf(s: HudState): Safety {
         return Safety(Level.CAUTION, Glyph.WARN, "POSSIBLE DROP", null, "Step ahead. Check with your cane.", drop.dropAheadM, "AHEAD")
     if (drop?.state == DropState.PATH_NOT_TRAVERSABLE) {
         val r = drop.pathReason
-        return if ("wall" in r) Safety(Level.CAUTION, Glyph.WARN, "WALL AHEAD", null, "Path blocked.")
+        return if ("wall" in r) Safety(Level.CAUTION, Glyph.WARN, "BLOCKED AHEAD", null, "Something is right in front of you.")
         else Safety(Level.CAUTION, Glyph.WARN, "CAN'T JUDGE PATH", null, "Use your cane.")
     }
     val obstacle = s.tracks.filter { it.sure && inPath(it) && !it.metres.isNaN() && it.metres < Settings.closeM }.minByOrNull { app.nadaka.urgency(it) }

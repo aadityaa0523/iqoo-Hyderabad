@@ -27,6 +27,7 @@ data class HudState(
     val cameraError: String? = null,  // camera could not be opened / permission denied
     val error: String? = null,        // the analysis loop failed
     val sensorError: String? = null,  // a sensor the safety logic needs is missing
+    val floorTrusted: Boolean = false, // the depth ruler matched the floor in the last depth frame
     val baroHPa: Float = Float.NaN,   // NaN = no barometer
     val atMs: Long = 0,
 )

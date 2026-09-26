@@ -81,12 +81,8 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
         choice("Contrast", listOf("Standard", "High", "Maximum"), t.contrastIndex()) {
             Prefs.palette = listOf(Palette.STANDARD, Palette.WHITE_ON_BLACK, Palette.YELLOW_ON_BLACK)[it]
         }
-        choice("Depth map colours", listOf("Standard", "High contrast"), if (Prefs.depthHc) 1 else 0, "Depth map colours. High contrast uses brightness and contour lines only.") {
-            Prefs.depthHc = it == 1
-        }
         choice("Visual detail", listOf("Standard", "Simplified"), if (Prefs.simplified) 1 else 0) { Prefs.simplified = it == 1 }
         choice("Motion", listOf("Reduced", "Standard"), if (Prefs.reducedMotion) 0 else 1) { Prefs.reducedMotion = it == 0 }
-        choice("Main view", HeroMode.entries.map { it.label }, Prefs.heroMode.ordinal) { Prefs.heroMode = HeroMode.entries[it] }
         choice("Camera image", CameraView.entries.map { it.label }, Prefs.camera.ordinal) { Prefs.camera = CameraView.entries[it] }
         toggle("Low vision preset", Prefs.lowVision, "Maximum contrast, extra large text, high contrast camera and depth.") { Prefs.applyLowVision(it) }
 

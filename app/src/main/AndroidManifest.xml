@@ -8,11 +8,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Step detector for ego speed. -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- Only for 127.0.0.1: the on-device Qwen server (see network_security_config). No internet use. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:label="Nadaka"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
 
         <!-- GPU delegate needs OpenCL from the vendor; optional so CPU still works without it. -->

@@ -122,8 +122,12 @@ class Tracker(private val model: EgoModel? = null) {
 
     private fun measure(t: Track, now: Long, ego: Ego) {
         val b = t.box
-        // Cut by the frame edge: the true box is taller, so this is an upper bound ("at most this far").
-        t.distance = (HEIGHTS[t.label] ?: 1f) / (b.height() * Settings.vfovRad)
+        // The class-height prior assumes the whole object is visible. A box cut by the frame edge, or a person
+        // who is sitting / half hidden (head and shoulders only), made "person 36.9 m" indoors. Unknown beats wrong.
+        val cut = b.top < 0.02f || b.bottom > 0.98f
+        val partialPerson = t.label == "person" && b.height() < 1.6f * b.width() * 0.75f // taller than wide ~2:1 when standing
+        t.distance = if (cut || partialPerson) Float.NaN
+            else ((HEIGHTS[t.label] ?: 1f) / (b.height() * Settings.vfovRad)).takeIf { it <= Settings.maxPriorM } ?: Float.NaN
         t.heights.addLast(now to b.height())
         while (now - t.heights.first().first > Settings.growthWindowMs) t.heights.removeFirst()
         val (t0, h0) = t.heights.first()

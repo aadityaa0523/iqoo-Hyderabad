@@ -297,7 +297,10 @@ class DepthAnalyzer {
         for (r in r0..r1) for (c in c0..c1) if (g[r][c] > 0f) v += g[r][c]
         // Top quartile of disparity = the nearest surface in that patch.
         val d = v.sorted().let { if (it.isEmpty()) return Float.NaN else it[it.size * 3 / 4] }
-        return scale / d
+        // The ruler is fitted on the floor 0.8-2 m ahead and Depth Anything's output also has an unknown offset,
+        // so the error grows fast with distance ("person 25.6 m" indoors). Past the alert range: unknown, not a guess.
+        // ponytail: scale-only ruler; fit scale + offset from the floor rows if far distances ever matter.
+        return (scale / d).takeIf { it <= Settings.maxDepthM } ?: Float.NaN
     }
 
     /** Latest grid for the on-screen depth thumbnail. */
