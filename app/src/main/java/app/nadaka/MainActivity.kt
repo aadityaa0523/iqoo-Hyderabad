@@ -1,0 +1,170 @@
+package app.nadaka
+
+import android.Manifest.permission.CAMERA
+import android.content.Context
+import android.content.pm.PackageManager.PERMISSION_GRANTED
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.RectF
+import android.os.Bundle
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.VibratorManager
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.util.Size
+import android.view.View
+import android.view.WindowManager
+import android.widget.FrameLayout
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import java.util.Locale
+import java.util.concurrent.Executors
+
+const val TAG = "NADAKA"
+
+/** Every tunable lives here; the caregiver screen will edit these. */
+object Settings {
+    var minScore = 0.4f
+    var speechCooldownMs = 2000L
+}
+
+class MainActivity : ComponentActivity() {
+    private lateinit var preview: PreviewView
+    private lateinit var overlay: Overlay
+    private lateinit var feedback: Feedback
+    private val analysisThread = Executors.newSingleThreadExecutor()
+    private val detector by lazy { Detector(this) } // created on the analysis thread
+    private var lastFrameMs = 0L
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        preview = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
+        overlay = Overlay(this)
+        setContentView(FrameLayout(this).apply { addView(preview); addView(overlay) })
+        feedback = Feedback(this)
+
+        if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
+        else registerForActivityResult(RequestPermission()) { if (it) startCamera() }.launch(CAMERA)
+    }
+
+    private fun startCamera() {
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            // Same 4:3 aspect for preview and analysis so overlay boxes line up.
+            val fourThree = AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+            val previewUse = Preview.Builder()
+                .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(fourThree).build())
+                .build()
+                .also { it.setSurfaceProvider(preview.surfaceProvider) }
+            val analysis = ImageAnalysis.Builder()
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(fourThree)
+                        .setResolutionStrategy(
+                            ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
+                        )
+                        .build()
+                )
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .build()
+                .also { it.setAnalyzer(analysisThread, ::analyze) }
+            future.get().run {
+                unbindAll()
+                bindToLifecycle(this@MainActivity, CameraSelector.DEFAULT_BACK_CAMERA, previewUse, analysis)
+            }
+        }, mainExecutor)
+    }
+
+    private fun analyze(image: ImageProxy) {
+        val t0 = SystemClock.elapsedRealtime()
+        val frame = image.use {
+            val bmp = it.toBitmap()
+            val rot = it.imageInfo.rotationDegrees
+            if (rot == 0) bmp
+            else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+        }
+        val t1 = SystemClock.elapsedRealtime()
+        val dets = detector.detect(frame, Settings.minScore)
+        val t2 = SystemClock.elapsedRealtime()
+        feedback.onDetections(dets)
+
+        val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
+        lastFrameMs = t2
+        val status = "${detector.backend}  $fps fps  cam ${t1 - t0}ms  det ${t2 - t1}ms"
+        Log.d(TAG, "$status  ${dets.joinToString { it.label }}")
+        overlay.post { overlay.show(dets, status, frame.width, frame.height) }
+    }
+}
+
+/** Speaks and vibrates for the largest detection. ponytail: no tracking or priority yet (M4). */
+class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
+    private val tts = TextToSpeech(ctx, this)
+    private val vibrator = ctx.getSystemService(VibratorManager::class.java).defaultVibrator
+    private val lastSaid = HashMap<String, Long>()
+    private val side = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
+    private val ahead = VibrationEffect.createWaveform(longArrayOf(0, 80, 80, 80), -1)
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) tts.language = Locale.ENGLISH
+    }
+
+    fun onDetections(dets: List<Detection>) {
+        val d = dets.maxByOrNull { it.box.width() * it.box.height() } ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - (lastSaid[d.label] ?: 0L) < Settings.speechCooldownMs) return
+        lastSaid[d.label] = now
+        val where = when {
+            d.box.centerX() < 0.33f -> "left"
+            d.box.centerX() > 0.66f -> "right"
+            else -> "ahead"
+        }
+        tts.speak("${d.label} $where", TextToSpeech.QUEUE_FLUSH, null, d.label)
+        vibrator.vibrate(if (where == "ahead") ahead else side)
+    }
+}
+
+/** Draws boxes over a FIT_CENTER preview plus a status line. */
+class Overlay(ctx: Context) : View(ctx) {
+    private var dets = emptyList<Detection>()
+    private var status = ""
+    private var imgW = 3
+    private var imgH = 4
+    private val box = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 6f; color = Color.YELLOW }
+    private val text = Paint().apply { color = Color.YELLOW; textSize = 42f; isAntiAlias = true }
+    private val bar = Paint().apply { color = 0xAA000000.toInt() }
+
+    fun show(d: List<Detection>, s: String, w: Int, h: Int) {
+        dets = d; status = s; imgW = w; imgH = h
+        invalidate()
+    }
+
+    override fun onDraw(c: Canvas) {
+        val scale = minOf(width / imgW.toFloat(), height / imgH.toFloat())
+        val dx = (width - imgW * scale) / 2
+        val dy = (height - imgH * scale) / 2
+        val w = imgW * scale
+        val h = imgH * scale
+        for (d in dets) {
+            val r = RectF(dx + d.box.left * w, dy + d.box.top * h, dx + d.box.right * w, dy + d.box.bottom * h)
+            c.drawRect(r, box)
+            c.drawText("${d.label} ${(d.score * 100).toInt()}%", r.left + 8, r.top + 44, text)
+        }
+        c.drawRect(0f, 100f, width.toFloat(), 170f, bar)
+        c.drawText(status, 24f, 150f, text)
+    }
+}
