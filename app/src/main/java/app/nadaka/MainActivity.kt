@@ -84,11 +84,35 @@ object Settings {
     var maxPitchDeg = 45f  // camera looking at the floor
     var maxRollDeg = 30f
     var lowBatteryPct = 15
+
+    // Speech (Alerts.kt)
+    var maxAlerts = 2 // e.g. "person approaching" AND "chair close" in the same breath
+    var closeM = 1.5f
+    var closeRepeatMs = 2500L
+    var veryCloseM = 0.75f
+    var hazardRepeatMs = 2500L
+
+    // Depth (Depth.kt). cameraHeightM is THE calibration knob: measure lens height on the wearer.
+    var depthEvery = 2 // run the depth model every Nth analysed frame
+    var cameraHeightM = 1.3f
+    var floorCalMinM = 0.8f
+    var floorCalMaxM = 2.0f
+    var floorFlatness = 0.3f
+    var dropMinM = 0.7f
+    var dropMaxM = 3.5f
+    var dropRatio = 0.3f // floor >30% farther than a flat floor would be = it drops away
+    var obstacleRatio = 0.25f
+    var hazardRows = 2
+    var depthHits = 2 // depth frames in a row before a drop/overhang is announced
+    var headMinM = 1.2f
+    var headMaxM = 2.1f
+    var overheadMaxM = 2.0f
+    var overheadGapM = 0.8f
 }
 
 class MainActivity : ComponentActivity() {
     private lateinit var preview: PreviewView
-    private lateinit var hud: Overlay
+    private lateinit var hud: Hud
     private lateinit var feedback: Feedback
     private val analysisThread = Executors.newSingleThreadExecutor()
     private val detector by lazy { Detector(this) } // created on the analysis thread
@@ -97,6 +121,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var ego: EgoMotion
     private lateinit var egoLog: EgoLog // analysis thread only
     private val policy = AlertPolicy() // analysis thread only
+    private val depth by lazy { DepthModel(this) } // analysis thread only
+    private val depthAnalyzer = DepthAnalyzer()
+    private var hazards = Hazards()
+    private var depthMs = 0L
+    private var depthFrames = 0
+    private var said = "" // last sentence spoken, shown as the caption
     private var camera: Camera? = null
     private var torchOn = false
     private var frameCount = 0
@@ -112,7 +142,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         preview = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
-        hud = Overlay(this)
+        hud = Hud(this)
         setContentView(FrameLayout(this).apply { addView(preview); addView(hud) })
         feedback = Feedback(this)
         ego = EgoMotion(this)
@@ -216,11 +246,11 @@ class MainActivity : ComponentActivity() {
         val t1 = SystemClock.elapsedRealtime()
         if (reading) {
             val (speech, done) = reader.step(frame)
-            speech?.let { feedback.say(it, strong = done) }
+            speech?.let { feedback.say(it, strong = done); said = it }
             if (done) reading = false
-            val status = "READ  ocr ${SystemClock.elapsedRealtime() - t1}ms"
-            Log.d(TAG, "$status  ${speech.orEmpty()}")
-            hud.post { hud.show(emptyList(), status, frame.width, frame.height) }
+            Log.d(TAG, "READ ocr ${SystemClock.elapsedRealtime() - t1}ms  ${speech.orEmpty()}")
+            val st = HudState(mode = "READ", said = said, imgW = frame.width, imgH = frame.height)
+            hud.post { hud.show(st) }
             return
         }
         val dets = detector.detect(frame, Settings.minScore)
@@ -234,18 +264,29 @@ class MainActivity : ComponentActivity() {
         val (luma, sharp) = frameStats(tiny, 64, 48)
         val (pitch, roll) = ego.gravity.let { tiltDegrees(it[0], it[1], it[2]) }
         val health = assess(luma, sharp, pitch, roll)
+
+        // Depth on the NPU every Nth frame: drop-offs, head height, unnamed obstacles, and metres per object.
+        if (depthFrames++ % Settings.depthEvery == 0 && health == Health.OK) {
+            val d0 = SystemClock.elapsedRealtime()
+            hazards = depthAnalyzer.analyze(depth.run(frame), pitch)
+            depthMs = SystemClock.elapsedRealtime() - d0
+        }
+        tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
         if (health == Health.DARK && !torchOn) { torchOn = true; camera?.cameraControl?.enableTorch(true) }
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
-        policy.decide(tracks, health, t2)?.let { feedback.play(it) }
+        policy.decide(tracks, health, t2, hazards).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
         checkBattery(t2)
 
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
         lastFrameMs = t2
-        val rec = if (egoLog.recording) "  REC${if (egoLog.label == 1) "+" else ""}" else ""
-        val warn = if (health != Health.OK) "  ${health.name}" else ""
-        val status = "${detector.backend} $fps fps det ${t2 - t1}ms  walk %.1fm/s$warn$rec".format(motion.speed)
-        Log.d(TAG, "$status  ${tracks.joinToString { "${it.label}#${it.id}${if (it.approaching) "!" else ""}" }}")
-        hud.post { hud.show(tracks, status, frame.width, frame.height) }
+        val rec = if (egoLog.recording) "REC${if (egoLog.label == 1) " +" else ""}" else ""
+        Log.d(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}")
+        val st = HudState(
+            backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
+            walkMps = motion.speed, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
+            depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
+        )
+        hud.post { hud.show(st) }
     }
 }
 
@@ -267,49 +308,16 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
         if (strong) vibrator.vibrate(result)
     }
 
-    fun play(a: Alert) {
-        tts.speak(a.text, TextToSpeech.QUEUE_FLUSH, null, a.text)
+    /** Most urgent first; the strongest buzz of the batch. */
+    fun play(alerts: List<Alert>) {
+        alerts.forEachIndexed { i, a -> tts.speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
         vibrator.vibrate(
-            when (a.buzz) {
-                Buzz.SIDE -> side
-                Buzz.AHEAD -> ahead
-                Buzz.APPROACH -> approach
-                Buzz.WARN -> result
+            when (alerts.maxOf { it.buzz.ordinal }) {
+                Buzz.WARN.ordinal -> result
+                Buzz.APPROACH.ordinal -> approach
+                Buzz.AHEAD.ordinal -> ahead
+                else -> side
             }
         )
-    }
-}
-
-/** Draws boxes over a FIT_CENTER preview plus a status line. */
-class Overlay(ctx: Context) : View(ctx) {
-    private var tracks = emptyList<Track>()
-    private var status = ""
-    private var imgW = 3
-    private var imgH = 4
-    private val box = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 6f; color = Color.YELLOW }
-    private val hot = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 10f; color = Color.RED }
-    private val text = Paint().apply { color = Color.YELLOW; textSize = 42f; isAntiAlias = true }
-    private val bar = Paint().apply { color = 0xAA000000.toInt() }
-
-    fun show(t: List<Track>, s: String, w: Int, h: Int) {
-        tracks = t; status = s; imgW = w; imgH = h
-        invalidate()
-    }
-
-    override fun onDraw(c: Canvas) {
-        val scale = minOf(width / imgW.toFloat(), height / imgH.toFloat())
-        val dx = (width - imgW * scale) / 2
-        val dy = (height - imgH * scale) / 2
-        val w = imgW * scale
-        val h = imgH * scale
-        for (t in tracks) {
-            val r = RectF(dx + t.box.left * w, dy + t.box.top * h, dx + t.box.right * w, dy + t.box.bottom * h)
-            c.drawRect(r, if (t.approaching) hot else box)
-            val dist = if (t.distance.isNaN()) "" else " %.1fm".format(t.distance)
-            val tag = if (t.approaching) " APPROACH %.1fs".format(t.ttc) else ""
-            c.drawText("${t.label}$dist$tag", r.left + 8, r.top + 44, text)
-        }
-        c.drawRect(0f, 100f, width.toFloat(), 170f, bar)
-        c.drawText(status, 24f, 150f, text)
     }
 }

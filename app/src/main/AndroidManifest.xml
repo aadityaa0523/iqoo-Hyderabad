@@ -9,7 +9,9 @@
 
     <application
         android:label="Nadaka"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
 
         <!-- GPU delegate needs OpenCL from the vendor; optional so CPU still works without it. -->
         <uses-native-library android:name="libOpenCL.so" android:required="false" />

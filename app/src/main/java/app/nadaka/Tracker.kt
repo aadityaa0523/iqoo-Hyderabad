@@ -40,7 +40,10 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
     val heights = ArrayDeque<Pair<Long, Float>>()
     var growth = 0f            // 1/s, relative image growth ("looming")
     var ttc = Float.POSITIVE_INFINITY
-    var distance = Float.NaN   // m, from class height; NaN when the box is cut by the frame edge
+    var distance = Float.NaN   // m, from class height (upper bound when the box is cut by the frame edge)
+    var depthM = Float.NaN     // m, from the depth model when available (better than the class prior)
+    /** Best distance estimate: depth model, else class-height prior. */
+    val metres get() = if (!depthM.isNaN()) depthM else distance
     var closing = 0f           // m/s, how fast the gap shrinks
     var objSpeed = 0f          // m/s toward me after subtracting my own walking
     var approaching = false
@@ -89,6 +92,8 @@ class Tracker(private val model: EgoModel? = null) {
 
     private fun measure(t: Track, now: Long, ego: Ego) {
         val b = t.box
+        // Cut by the frame edge: the true box is taller, so this is an upper bound ("at most this far").
+        t.distance = (HEIGHTS[t.label] ?: 1f) / (b.height() * Settings.vfovRad)
         t.heights.addLast(now to b.height())
         while (now - t.heights.first().first > Settings.growthWindowMs) t.heights.removeFirst()
         val (t0, h0) = t.heights.first()
@@ -98,8 +103,7 @@ class Tracker(private val model: EgoModel? = null) {
         t.growth = ln(b.height() / h0) / span
         t.ttc = if (t.growth > 0.01f) 1 / t.growth else Float.POSITIVE_INFINITY
         val clipped = b.top <= 0.01f || b.bottom >= 0.99f
-        t.distance = if (clipped) Float.NaN else (HEIGHTS[t.label] ?: 1f) / (b.height() * Settings.vfovRad)
-        t.closing = if (t.distance.isNaN()) 0f else t.distance * t.growth
+        t.closing = if (clipped) 0f else t.distance * t.growth // growth of a cut box is meaningless
         t.objSpeed = t.closing - ego.speed * cos(t.bearing) // my walking explains this much of the growth
         t.features = floatArrayOf(
             t.growth, t.closing, ego.speed, abs(ego.yawRate), abs(ego.pitchRate), b.height(),

@@ -1,44 +1,78 @@
 package app.nadaka
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AlertPolicyTest {
-    private fun track(id: Int, label: String = "chair", h: Float = 0.3f, cx: Float = 0.5f, hits: Int = 5, approaching: Boolean = false) =
-        Track(id, label, Box(cx - 0.05f, 0.9f - h, cx + 0.05f, 0.9f), 0L).also {
-            it.hits = hits; it.approaching = approaching; it.ttc = 2f
-        }
+    private fun track(
+        id: Int, label: String = "chair", h: Float = 0.3f, cx: Float = 0.5f, hits: Int = 5,
+        approaching: Boolean = false, metres: Float = 3f,
+    ) = Track(id, label, Box(cx - 0.05f, 0.9f - h, cx + 0.05f, 0.9f), 0L).also {
+        it.hits = hits; it.approaching = approaching; it.ttc = 2f; it.distance = metres
+    }
+
+    private fun AlertPolicy.say(tracks: List<Track>, now: Long, health: Health = Health.OK, hz: Hazards = Hazards()) =
+        decide(tracks, health, now, hz).map { it.text }
 
     @Test fun oneFrameFlickerIsIgnored() {
-        assertNull(AlertPolicy().decide(listOf(track(1, hits = 1)), Health.OK, 0))
+        assertEquals(emptyList<String>(), AlertPolicy().say(listOf(track(1, hits = 1)), 0))
     }
 
-    @Test fun sameChairIsNotRepeatedUntilItIsMuchCloser() {
+    @Test fun distanceIsSpoken() {
+        assertEquals(listOf("chair, 3 metres, 12 o'clock."), AlertPolicy().say(listOf(track(1, metres = 3.1f)), 0))
+        assertEquals("very close", metres(0.4f))
+        assertEquals("1 metre", metres(1.1f))
+        assertEquals("2.5 metres", metres(2.4f))
+    }
+
+    @Test fun sameFarChairIsNotRepeatedUntilItIsMuchCloser() {
         val p = AlertPolicy()
-        assertEquals("chair, 12 o'clock", p.decide(listOf(track(1, h = 0.3f)), Health.OK, 0)?.text)
-        assertNull(p.decide(listOf(track(1, h = 0.32f)), Health.OK, 10_000))
-        assertEquals("chair, 12 o'clock", p.decide(listOf(track(1, h = 0.45f)), Health.OK, 20_000)?.text)
+        assertEquals(1, p.say(listOf(track(1, h = 0.3f)), 0).size)
+        assertEquals(0, p.say(listOf(track(1, h = 0.32f)), 10_000).size)
+        assertEquals(1, p.say(listOf(track(1, h = 0.45f)), 20_000).size)
     }
 
-    @Test fun approachingBeatsNearestObstacle() {
-        val a = AlertPolicy().decide(listOf(track(1, h = 0.6f), track(2, "person", h = 0.2f, cx = 0.8f, approaching = true)), Health.OK, 0)
-        assertEquals(Buzz.APPROACH, a?.buzz)
-        assertTrue(a!!.text.startsWith("person approaching"))
+    @Test fun closeAndApproachingAreBothAnnounced() {
+        val said = AlertPolicy().say(
+            listOf(track(1, metres = 1.0f), track(2, "person", cx = 0.8f, approaching = true, metres = 4f)), 0,
+        )
+        assertEquals(listOf("person approaching, 4 metres, 1 o'clock.", "chair close, 1 metre, 12 o'clock."), said)
+    }
+
+    @Test fun closeObjectKeepsRepeatingWhileClose() {
+        val p = AlertPolicy()
+        val near = listOf(track(1, metres = 0.9f))
+        assertEquals(1, p.say(near, 0).size)
+        assertEquals(0, p.say(near, 500).size)
+        assertEquals(1, p.say(near, Settings.closeRepeatMs).size)
+    }
+
+    @Test fun dropOffComesFirst() {
+        val said = AlertPolicy().say(listOf(track(1, metres = 1f)), 0, hz = Hazards(dropAtM = 1.5f))
+        assertEquals("Stop. Drop ahead, 1.5 metres.", said.first())
+    }
+
+    @Test fun headHeightHazard() {
+        val said = AlertPolicy().say(emptyList(), 0, hz = Hazards(overheadAtM = 1.2f, overheadBearing = 0f))
+        assertEquals(listOf("Head height obstacle, 1 metre, 12 o'clock."), said)
+    }
+
+    @Test fun unnamedFloorObstacleFromDepth() {
+        assertEquals(listOf("Obstacle ahead, 1 metre."), AlertPolicy().say(emptyList(), 0, hz = Hazards(floorObstacleAtM = 1.1f)))
     }
 
     @Test fun crowdIsSummarised() {
         val people = (1..5).map { track(it, "person", cx = 0.1f + it * 0.15f) }
-        assertEquals("Crowd ahead.", AlertPolicy().decide(people, Health.OK, 0)?.text)
+        assertEquals(listOf("Crowd ahead."), AlertPolicy().say(people, 0))
     }
 
     @Test fun darkMustPersistThenSilencesObjects() {
         val p = AlertPolicy()
         val chair = listOf(track(1))
-        assertEquals("chair, 12 o'clock", p.decide(chair, Health.DARK, 0)?.text) // not yet persisted: still trusted
-        assertEquals(Health.DARK.message, p.decide(chair, Health.DARK, Settings.healthPersistMs)?.text)
-        assertNull(p.decide(chair, Health.DARK, Settings.healthPersistMs + 100)) // no object cues from a dark image
+        assertEquals(1, p.say(chair, 0, Health.DARK).size) // not yet persisted: still trusted
+        assertEquals(listOf(Health.DARK.message), p.say(chair, Settings.healthPersistMs, Health.DARK))
+        assertEquals(0, p.say(chair, Settings.healthPersistMs + 100, Health.DARK).size)
         assertTrue(p.blind)
     }
 

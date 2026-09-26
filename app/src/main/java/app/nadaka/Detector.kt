@@ -35,7 +35,7 @@ class Detector(ctx: Context) {
         val fd = ctx.assets.openFd("detect.tflite")
         val model = FileInputStream(fd.fileDescriptor).channel
             .map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-        val (interp, name) = open(ctx, model)
+        val (interp, name) = openInterpreter(ctx, model)
         interpreter = interp
         backend = name
         interpreter.allocateTensors()
@@ -89,27 +89,29 @@ class Detector(ctx: Context) {
         }
         return kept
     }
+}
 
-    /** Hexagon NPU (QNN HTP), then GPU, then CPU. */
-    private fun open(ctx: Context, model: MappedByteBuffer): Pair<Interpreter, String> {
-        try {
-            check(QnnDelegate.checkCapability(QnnDelegate.Capability.HTP_RUNTIME_QUANTIZED)) { "no HTP" }
-            val qnn = QnnDelegate(QnnDelegate.Options().apply {
-                setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
-                setSkelLibraryDir(ctx.applicationInfo.nativeLibraryDir)
-                setCacheDir(ctx.cacheDir.absolutePath) // compiled graph cached: faster next launch
-                // Sustained, not burst: a walking aid runs for hours, so avoid thermal throttling.
-                setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE)
-            })
-            return Interpreter(model, Interpreter.Options().addDelegate(qnn)) to "NPU"
-        } catch (e: Throwable) {
-            Log.w(TAG, "NPU unavailable: $e")
-        }
-        try { // no allow-list check: the list doesn't know the 8 Elite Gen 5's GPU yet
-            return Interpreter(model, Interpreter.Options().addDelegate(GpuDelegate())) to "GPU"
-        } catch (e: Throwable) {
-            Log.w(TAG, "GPU unavailable: $e")
-        }
-        return Interpreter(model, Interpreter.Options().setNumThreads(4)) to "CPU"
+/** Hexagon NPU (QNN HTP), then GPU, then CPU. [fp16] for float models (runs the HTP in half precision). */
+fun openInterpreter(ctx: Context, model: MappedByteBuffer, fp16: Boolean = false): Pair<Interpreter, String> {
+    try {
+        val cap = if (fp16) QnnDelegate.Capability.HTP_RUNTIME_FP16 else QnnDelegate.Capability.HTP_RUNTIME_QUANTIZED
+        check(QnnDelegate.checkCapability(cap)) { "no HTP $cap" }
+        val qnn = QnnDelegate(QnnDelegate.Options().apply {
+            setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
+            setSkelLibraryDir(ctx.applicationInfo.nativeLibraryDir)
+            setCacheDir(ctx.cacheDir.absolutePath) // compiled graph cached: faster next launch
+            // Sustained, not burst: a walking aid runs for hours, so avoid thermal throttling.
+            setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE)
+            if (fp16) setHtpPrecision(QnnDelegate.Options.HtpPrecision.HTP_PRECISION_FP16)
+        })
+        return Interpreter(model, Interpreter.Options().addDelegate(qnn)) to "NPU"
+    } catch (e: Throwable) {
+        Log.w(TAG, "NPU unavailable: $e")
     }
+    try { // no allow-list check: the list doesn't know the 8 Elite Gen 5's GPU yet
+        return Interpreter(model, Interpreter.Options().addDelegate(GpuDelegate())) to "GPU"
+    } catch (e: Throwable) {
+        Log.w(TAG, "GPU unavailable: $e")
+    }
+    return Interpreter(model, Interpreter.Options().setNumThreads(4)) to "CPU"
 }

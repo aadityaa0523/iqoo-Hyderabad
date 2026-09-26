@@ -52,61 +52,110 @@ fun clock(bearingRad: Float): String {
     return "${if (hour == 0) 12 else (12 + hour - 1) % 12 + 1} o'clock"
 }
 
+/** Depth-model hazards for this frame (Depth.kt). Null = not present. */
+data class Hazards(
+    val dropAtM: Float? = null,
+    val overheadAtM: Float? = null,
+    val overheadBearing: Float = 0f,
+    val floorObstacleAtM: Float? = null,
+)
+
+/** "2.5 metres", "1 metre", "very close"; "" when unknown. */
+fun metres(m: Float): String {
+    if (m.isNaN()) return ""
+    if (m < Settings.veryCloseM) return "very close"
+    val r = kotlin.math.round(m * 2) / 2
+    return when {
+        r == 1f -> "1 metre"
+        r % 1f == 0f -> "${r.toInt()} metres"
+        else -> "$r metres"
+    }
+}
+
+private fun phrase(vararg parts: String) = parts.filter { it.isNotEmpty() }.joinToString(", ") + "."
+
 /**
- * Picks at most ONE thing to say per frame, in priority order:
- * unusable camera > something approaching > crowd > nearest new obstacle.
- * Handles flicker (min hits), nagging (habituation per track), and crowds.
- * Pure logic, single-threaded, unit-tested.
+ * Decides what to say each frame, most urgent first, up to [Settings.maxAlerts] messages:
+ * unusable camera > drop-off > head-height > approaching > close by > crowd > new obstacle.
+ * Approaching and close-by are separate channels, so both are announced when both happen.
+ * Handles flicker (min hits), nagging (habituation per track), and crowds. Pure logic, unit-tested.
  */
 class AlertPolicy {
     private var health = Health.OK
     private var healthSince = 0L
     private var healthSaid = Health.OK
     private var healthSaidMs = 0L
-    private var lastSpeakMs = -1_000_000L
+    private var lastInfoMs = -1_000_000L
     private var lastApproachMs = -1_000_000L
+    private var lastCloseMs = -1_000_000L
+    private var lastDropMs = -1_000_000L
+    private var lastOverheadMs = -1_000_000L
     private var lastCrowdMs = -1_000_000L
     private val spokenHeight = HashMap<Int, Float>()
 
     /** True while the camera has been unusable long enough that detections are not trusted. */
     val blind get() = health != Health.OK
 
-    fun decide(tracks: List<Track>, raw: Health, now: Long): Alert? {
-        // 1. Camera health, with persistence so one dark frame doesn't cry wolf.
+    fun decide(tracks: List<Track>, raw: Health, now: Long, hz: Hazards = Hazards()): List<Alert> {
+        // Camera health, with persistence so one dark frame doesn't cry wolf.
         if (raw != health) { health = raw; healthSince = now }
         if (health != Health.OK && now - healthSince >= Settings.healthPersistMs) {
             if (healthSaid != health || now - healthSaidMs > Settings.healthRepeatMs) {
                 healthSaid = health; healthSaidMs = now
-                return Alert(health.message, Buzz.WARN)
+                return listOf(Alert(health.message, Buzz.WARN))
             }
-            return null // detections from a bad image are not trusted
+            return emptyList() // detections from a bad image are not trusted
         }
         if (health == Health.OK) healthSaid = Health.OK
 
+        val out = ArrayList<Alert>()
         val stable = tracks.filter { it.hits >= Settings.minHits } // never trust one frame
 
-        // 2. Something coming at me, with my own walking already removed (ego-motion).
-        stable.filter { it.approaching }.minByOrNull { it.ttc }?.let {
-            if (now - lastApproachMs < Settings.approachCooldownMs) return null
-            lastApproachMs = now; lastSpeakMs = now
-            return Alert("${it.label} approaching, ${clock(it.bearing)}", Buzz.APPROACH)
+        // Depth hazards: the things a cane can't find in time.
+        hz.dropAtM?.let {
+            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN) }
+        }
+        hz.overheadAtM?.let {
+            if (now - lastOverheadMs >= Settings.hazardRepeatMs) {
+                lastOverheadMs = now
+                out += Alert(phrase("Head height obstacle", metres(it), clock(hz.overheadBearing)), Buzz.WARN)
+            }
         }
 
-        // 3. Crowd: one summary instead of "person, person, person".
+        // Approaching: my own walking already removed (ego-motion).
+        val coming = stable.filter { it.approaching }.minByOrNull { it.ttc }
+        if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
+            lastApproachMs = now
+            out += Alert(phrase("${coming.label} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH)
+        }
+
+        // Close by: repeats while close, even if already announced (it is a collision risk).
+        val close = stable.filter { it !== coming && it.metres < Settings.closeM }.minByOrNull { it.metres }
+        if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
+            lastCloseMs = now
+            spokenHeight[close.id] = close.box.height()
+            out += Alert(phrase("${close.label} close", metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
+        } else if (close == null && coming == null) {
+            hz.floorObstacleAtM?.takeIf { it < Settings.closeM && now - lastCloseMs >= Settings.closeRepeatMs }?.let {
+                lastCloseMs = now
+                out += Alert(phrase("Obstacle ahead", metres(it)), Buzz.AHEAD) // something YOLO can't name (wall, pole)
+            }
+        }
+        if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
+
+        // Calm information: crowd summary, or one new obstacle with its distance.
+        if (now - lastInfoMs < Settings.speechGapMs) return out
         val crowd = stable.count { it.label == "person" } >= Settings.crowdCount
         if (crowd && now - lastCrowdMs > Settings.crowdRepeatMs) {
-            lastCrowdMs = now; lastSpeakMs = now
-            return Alert("Crowd ahead.", Buzz.AHEAD)
+            lastCrowdMs = now; lastInfoMs = now
+            return listOf(Alert("Crowd ahead.", Buzz.AHEAD))
         }
-
-        // 4. Nearest obstacle, once per object unless it gets much closer (habituation).
-        val t = stable.filter { !(crowd && it.label == "person") }.maxByOrNull { it.box.height() } ?: return null
+        val t = stable.filter { !(crowd && it.label == "person") }.maxByOrNull { it.box.height() } ?: return out
         val said = spokenHeight[t.id]
-        if (said != null && t.box.height() < said * Settings.habituationGrowth) return null
-        if (now - lastSpeakMs < Settings.speechGapMs) return null
+        if (said != null && t.box.height() < said * Settings.habituationGrowth) return out
         spokenHeight[t.id] = t.box.height()
-        lastSpeakMs = now
+        lastInfoMs = now
         val c = clock(t.bearing)
-        return Alert("${t.label}, $c", if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE)
+        return listOf(Alert(phrase(t.label, metres(t.metres), c), if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE))
     }
 }
