@@ -311,7 +311,7 @@ class MainActivity : ComponentActivity() {
                 if (text.isBlank()) HELP_TEXT else "I heard: $text. $HELP_TEXT"
             }
         }
-        feedback.say(reply, strong = ask == Ask.SAFETY)
+        feedback.answer(reply, strong = ask == Ask.SAFETY)
         said = reply
     }
 
@@ -325,7 +325,7 @@ class MainActivity : ComponentActivity() {
         said = "Gemma is looking…"
         gemma.ask(prompt, latestFrame) { reply ->
             val safe = reply?.takeIf { !SafetyGate.greenLight(it) } ?: fallback
-            runOnUiThread { feedback.say(safe); said = "Gemma: $safe" }
+            runOnUiThread { feedback.answer(safe); said = "Gemma: $safe" }
         }
         return true
     }
@@ -431,20 +431,41 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     private val result = VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
     private val approach = VibrationEffect.createWaveform(longArrayOf(0, 60, 40, 60, 40, 60, 40, 200), -1)
 
+    /** True while an answer (Gemma, "what's ahead", "is it safe") is being spoken: routine alerts must not cut it off. */
+    @Volatile var answering = false
+        private set
+
+    init {
+        tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(id: String?) = Unit
+            override fun onDone(id: String?) { if (id == ANSWER) answering = false }
+            @Deprecated("") override fun onError(id: String?) { if (id == ANSWER) answering = false }
+            override fun onStop(id: String?, interrupted: Boolean) { if (id == ANSWER) answering = false }
+        })
+    }
+
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) tts.language = Locale.ENGLISH
+    }
+
+    /** Speaks an answer to the user's question in full. Only danger (see [play]) may interrupt it. */
+    fun answer(text: String, strong: Boolean = false) {
+        answering = true
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, ANSWER)
+        if (strong) vibrator.vibrate(result)
     }
 
     fun buzz() = vibrator.vibrate(side)
 
     /** Stop talking before listening: the recognizer must not hear us. */
-    fun hush() = tts.stop()
+    fun hush() { answering = false; tts.stop() }
 
     /** The microphone is open now: a crisp double tap (vibration, so it doesn't pollute the audio). */
     fun readyCue() = vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), intArrayOf(0, 255, 0, 255), -1))
 
     fun say(text: String, strong: Boolean = false) {
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text)
+        // Never cut off an answer: queue behind it.
+        tts.speak(text, if (answering) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH, null, text)
         if (strong) vibrator.vibrate(result)
     }
 
@@ -458,6 +479,13 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
 
     /** Haptics-first: the most urgent pattern, plus only the short words that must be heard. */
     fun play(alerts: List<Alert>) {
+        if (answering) {
+            // The user is listening to an answer: feel routine alerts, hear only danger (it interrupts).
+            alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
+            val danger = alerts.filter { it.buzz == Buzz.WARN }.map { it.short ?: it.text }
+            if (danger.isNotEmpty()) { answering = false; tts.speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger") }
+            return
+        }
         if (Settings.hapticsFirst) {
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
             val words = alerts.mapNotNull { it.short }
@@ -465,6 +493,10 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
             return
         }
         speakAll(alerts)
+    }
+
+    private companion object {
+        const val ANSWER = "answer"
     }
 
     /** Speech mode: full sentences, most urgent first; the strongest buzz of the batch. */
