@@ -85,6 +85,11 @@ object Settings {
     var maxRollDeg = 30f
     var lowBatteryPct = 15
 
+    // Thermal governor (Thermal.kt)
+    var heatWindow = 60 // frames per p90 window
+    var heatWarmupFrames = 240 // NPU warm-up: ignore our own speed until then
+    var heatCalmMs = 20000L // calm needed before stepping down a tier
+
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
     var chatty = false
     var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
@@ -140,8 +145,11 @@ class MainActivity : ComponentActivity() {
     private var camera: Camera? = null
     private var torchOn = false
     private var frameCount = 0
-    @Volatile private var frameStride = 1 // raised when the phone gets hot
-    private var thermalSaid = false
+    private val heat = ThermalGovernor() // analysis thread only
+    private var headroom = Float.NaN
+    private var batteryC = Float.NaN
+    private var lastHeatPollMs = 0L
+    private var lastFrameStartMs = 0L
     private var batterySaid = false
     private var lastBatteryCheckMs = 0L
     private val tiny = IntArray(64 * 48)
@@ -173,21 +181,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); ego.start() }
 
-    /** Sustained NPU mode keeps us cool; if the phone still heats up, analyse fewer frames and say so once. */
-    private val thermal = PowerManager.OnThermalStatusChangedListener { status ->
-        frameStride = when {
-            status >= PowerManager.THERMAL_STATUS_SEVERE -> 3
-            status >= PowerManager.THERMAL_STATUS_MODERATE -> 2
-            else -> 1
-        }
-        if (status >= PowerManager.THERMAL_STATUS_SEVERE && !thermalSaid) {
-            thermalSaid = true
-            feedback.say("Phone is hot. Slowing down, alerts may be late.", strong = true)
-        }
-    }
-
-    override fun onStart() { super.onStart(); getSystemService(PowerManager::class.java).addThermalStatusListener(mainExecutor, thermal) }
-    override fun onStop() { getSystemService(PowerManager::class.java).removeThermalStatusListener(thermal); super.onStop() }
     override fun onPause() { ego.stop(); super.onPause() }
 
     private fun startCamera() {
@@ -236,6 +229,15 @@ class MainActivity : ComponentActivity() {
         return true
     }
 
+    /** Headroom is rate-limited by the OS; battery temperature changes slowly. Poll every 2 s. */
+    private fun pollHeat(now: Long) {
+        if (now - lastHeatPollMs < 2000) return
+        lastHeatPollMs = now
+        headroom = getSystemService(PowerManager::class.java).getThermalHeadroom(10)
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        batteryC = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000)?.takeIf { it > -1000 }?.div(10f) ?: Float.NaN
+    }
+
     private fun checkBattery(now: Long) {
         if (batterySaid || now - lastBatteryCheckMs < 60_000) return
         lastBatteryCheckMs = now
@@ -247,7 +249,7 @@ class MainActivity : ComponentActivity() {
     private fun analyze(image: ImageProxy) {
         // Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further.
         val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.VEHICLE -> 4 }
-        if (frameCount++ % maxOf(frameStride, modeStride) != 0 && !reading) { image.close(); return }
+        if (frameCount++ % maxOf(heat.tier.detectEvery, modeStride) != 0 && !reading) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
             val bmp = it.toBitmap()
@@ -281,7 +283,7 @@ class MainActivity : ComponentActivity() {
         activity.update(t2, ego.lastStepMs, ego.vibration)?.let { feedback.say(it.spoken); said = it.spoken }
         val depthOn = activity.current != Activity.VEHICLE // bus lurches fake drop-offs
         if (!depthOn) hazards = Hazards()
-        if (depthOn && depthFrames++ % Settings.depthEvery == 0 && health == Health.OK) {
+        if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
             hazards = depthAnalyzer.analyze(depth.run(frame), pitch)
             depthMs = SystemClock.elapsedRealtime() - d0
@@ -291,13 +293,16 @@ class MainActivity : ComponentActivity() {
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
         policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
         checkBattery(t2)
+        pollHeat(t2)
+        heat.update(t2, getSystemService(PowerManager::class.java).currentThermalStatus, headroom, batteryC,
+            SystemClock.elapsedRealtime() - t0)?.let { feedback.say(it.spoken, strong = it > HeatTier.WARM); said = it.spoken }
 
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
         lastFrameMs = t2
         val rec = if (egoLog.recording) "REC${if (egoLog.label == 1) " +" else ""}" else ""
         Log.d(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}")
         val st = HudState(
-            mode = activity.current.name, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
+            mode = activity.current.name, heat = heat.tier, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             walkMps = motion.speed, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
         )

@@ -21,6 +21,7 @@ data class HudState(
     val depthMs: Long = 0,
     val walkMps: Float = 0f,
     val health: Health = Health.OK,
+    val heat: HeatTier = HeatTier.NOMINAL,
     val rec: String = "",
     val tracks: List<Track> = emptyList(),
     val hazards: Hazards = Hazards(),
@@ -127,7 +128,9 @@ class Hud(ctx: Context) : View(ctx) {
         var x2 = width * 0.44f
         if (s.depthBackend.isNotEmpty()) x2 = chip(c, x2, y2, "DEPTH ${s.depthBackend} ${s.depthMs}ms", if (s.depthBackend == "NPU") green else orange)
         if (s.rec.isNotEmpty()) chip(c, x2, y2, s.rec, red, Color.WHITE)
-        if (s.health != Health.OK) chip(c, width * 0.44f, top + 68 * dp, s.health.name, red, Color.WHITE)
+        var x3 = width * 0.44f
+        if (s.health != Health.OK) x3 = chip(c, x3, top + 68 * dp, s.health.name, red, Color.WHITE)
+        if (s.heat != HeatTier.NOMINAL) chip(c, x3, top + 68 * dp, "HEAT ${s.heat.name}", if (s.heat == HeatTier.WARM) orange else red, Color.WHITE)
     }
 
     /** Clock-face radar: 10 to 2 o'clock, rings at 1, 2, 3 m. */
