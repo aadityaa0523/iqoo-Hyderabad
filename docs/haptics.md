@@ -22,13 +22,20 @@ means **no spatial direction** from vibration alone: direction stays in speech, 
 
 ## The haptic vocabulary (5 patterns, learnable in a minute)
 
+First on-device test: the motor's 20 ms composition primitives were too faint through clothes on
+the chest, and ticking never stopped at a desk. Version 2 uses amplitude waveforms of 60-350 ms
+and ticks only while the gap is shrinking.
+
 | Meaning | Pattern | Why this shape |
 |---|---|---|
-| **Something in my path** | Single ticks, faster as it gets closer: none beyond 3 m, ~1 per second at 3 m, ~4 per second at 1 m, continuous under 0.75 m | Parking-sensor metaphor; needs no training |
-| **Stop: drop-off** | Three long heavy pulses (THUD x3, 350 ms apart) | Heaviest, slowest, unmistakable; the one pattern that must never be confused |
-| **Head-height obstacle** | Two rising swells (QUICK_RISE x2) | "Rising" = up at head level |
-| **Something approaching** | Quick accelerating triple tap (CLICK, 120/80/40 ms) | Accelerating rhythm = coming at you |
-| **Camera can't see** | Two low thuds, soft | Distinct, calm: "I'm not reliable right now" |
+| **Something in my path** | 45 ms ticks, only while walking and only while the gap shrinks: none beyond 2.5 m, ~1/s at 2.5 m, ~3/s at 1 m, near-continuous under 0.75 m; stops after 4 s without progress (desk, queue), except at touching range | Parking-sensor metaphor; habituation so it never nags |
+| **Stop: drop-off** | Three long heavy pulses (350 ms on, 200 ms off, full strength) | Heaviest, slowest, unmistakable |
+| **Head-height obstacle** | Two swells ramping up (70 -> 150 -> 255) | "Rising" = up at head level |
+| **Something approaching** | Four 60 ms taps with shrinking gaps (220, 130, 60 ms) | Accelerating = coming at you |
+| **Camera can't see** | Two soft 180 ms pulses | Calm, different texture |
+
+Intensity: three levels only (0.65 / 0.85 / 1.0), all strong enough for the chest, one
+`hapticGain` knob to scale everything per user.
 
 ## What is still spoken (haptics mode, the default)
 

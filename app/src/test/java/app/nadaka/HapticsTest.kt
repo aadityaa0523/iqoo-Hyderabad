@@ -8,18 +8,40 @@ import org.junit.Test
 class HapticsTest {
     @Test fun parkingSensorFasterWhenCloser() {
         assertNull(pulseIntervalMs(Float.NaN))
-        assertNull(pulseIntervalMs(4f)) // beyond 3 m: silence
-        val far = pulseIntervalMs(3f)!!
-        val mid = pulseIntervalMs(2f)!!
+        assertNull(pulseIntervalMs(3f)) // beyond 2.5 m: silence
+        val far = pulseIntervalMs(Settings.pulseMaxM)!!
+        val mid = pulseIntervalMs(1.8f)!!
         val near = pulseIntervalMs(1f)!!
         assertTrue(far > mid && mid > near)
         assertEquals(1000L, far)
-        assertEquals(250L, near)
-        assertEquals(120L, pulseIntervalMs(0.5f)) // about to touch: continuous
+        assertEquals(300L, near)
+        assertEquals(150L, pulseIntervalMs(0.5f)) // about to touch: near-continuous
     }
 
     @Test fun threeIntensityLevelsOnly() {
-        assertEquals(setOf(0.4f, 0.7f, 1f), listOf(2.5f, 1.2f, 0.5f).map { pulseAmplitude(it) }.toSet())
+        assertEquals(setOf(0.65f, 0.85f, 1f), listOf(2.2f, 1.2f, 0.5f).map { pulseAmplitude(it) }.toSet())
+    }
+
+    @Test fun ticksWhileApproachingThenStopWhenStandingStill() {
+        val p = ProximityPulse()
+        var ticks = 0
+        // Walk from 2.4 m to 1.2 m over 3 s: ticks, getting faster.
+        for (i in 0..60) if (p.update(i * 50L, 2.4f - i * 0.02f) != null) ticks++
+        assertTrue("ticks while approaching: $ticks", ticks >= 4)
+        // Stand at 1.2 m for 10 s (desk, wall): ticking must stop after the stale window.
+        var late = 0
+        for (i in 61..260) if (p.update(i * 50L, 1.2f) != null && i * 50L > 3000 + Settings.pulseStaleMs) late++
+        assertEquals(0, late)
+        // But touching range always ticks.
+        assertTrue((0..20).any { p.update(20_000L + it * 50L, 0.5f) != null })
+    }
+
+    @Test fun newObjectRestartsTicking() {
+        val p = ProximityPulse()
+        for (i in 0..200) p.update(i * 50L, 2f) // standing: goes quiet
+        assertNull(p.update(10_100, 2f))
+        p.update(10_200, Float.NaN) // it's gone
+        assertTrue((0..40).any { p.update(10_300L + it * 50L, 2.3f - it * 0.03f) != null }) // walking at something new
     }
 
     @Test fun hazardsSpeakShortWordsAndApproachingIsVibrationOnly() {

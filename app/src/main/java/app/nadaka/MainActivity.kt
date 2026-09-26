@@ -102,7 +102,11 @@ object Settings {
 
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
     var hapticsFirst = true // vibration carries routine alerts; speech only for "Stop. Drop." etc. (docs/haptics.md)
-    var pulseMaxM = 3f // proximity ticks start when something in the path is this close
+    var pulseMaxM = 2.5f // proximity ticks start when something in the path is this close
+    var pulseProgressM = 0.3f // the gap must shrink by this much to count as "getting closer"
+    var pulseStaleMs = 4000L // no progress for this long -> stop ticking (except at touching range)
+    var tickMs = 45L // long enough to feel on the chest
+    var hapticGain = 1.0f // one knob for overall strength if the user finds it weak/strong
     var chatty = false // true = static objects at any distance, not just within staticRangeM
     var staticRangeM = 5f  // announce static objects within this range (once each)
     var staticPathDeg = 30f // ...and roughly ahead: things far to the side don't block the way
@@ -342,7 +346,7 @@ class MainActivity : ComponentActivity() {
         policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
         // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
-        if (activity.current != Activity.VEHICLE && !policy.blind) {
+        if (activity.current == Activity.WALKING && !policy.blind) { // ticks only while walking
             val inPathM = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() && inPath(it) && (it.sure || it.metres < Settings.veryCloseM) }
                 .minOfOrNull { it.metres }
             feedback.haptics.proximity(listOfNotNull(inPathM, hazards.floorObstacleAtM).minOrNull() ?: Float.NaN)
