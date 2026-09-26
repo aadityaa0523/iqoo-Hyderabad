@@ -88,6 +88,9 @@ class Tracker(private val model: EgoModel? = null) {
     private var nextId = 0
     private var lastMs = 0L
 
+    /** Lens switch: old boxes are in different image coordinates, so their growth history is meaningless. */
+    fun reset() { tracks = emptyList(); lastMs = 0L }
+
     /** Returns the tracks seen this frame. */
     fun update(dets: List<Detection>, now: Long, ego: Ego): List<Track> {
         val dt = if (lastMs == 0L) 0f else (now - lastMs) / 1000f

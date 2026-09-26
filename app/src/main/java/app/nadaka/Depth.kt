@@ -81,6 +81,10 @@ class DepthAnalyzer {
     var scale = Float.NaN
         private set
     private val pending = ArrayList<Float>() // candidate floor scales before the ruler is trusted
+    private var mismatch = 0 // flat floor frames that disagree with the trusted ruler
+
+    /** New lens or camera height: learn the floor ruler again (takes Settings.scaleLockFrames frames). */
+    fun relearn() { scale = Float.NaN; pending.clear(); dropHits = 0; overheadHits = 0; lastDropM = Float.NaN; mismatch = 0 }
     private var dropHits = 0
     private var lastDropM = Float.NaN
     private var lastDropMs = 0L
@@ -130,6 +134,10 @@ class DepthAnalyzer {
                 val near = median(samples.takeLast(3)) / scale
                 floorOk = near in (1 / Settings.scaleTolerance)..Settings.scaleTolerance
                 if (floorOk && flat) scale = scale * 0.9f + m * 0.1f
+                // A flat floor that keeps disagreeing for many frames means the ruler is stale (e.g. the phone
+                // was re-mounted), not that I'm standing on a table: relearn instead of staying blind forever.
+                mismatch = if (!floorOk && flat) mismatch + 1 else 0
+                if (mismatch >= Settings.scaleLockFrames * 4) relearn()
             }
         }
         if (scale.isNaN() || !floorOk) return Hazards() // honest: no trusted floor this frame, no depth claims

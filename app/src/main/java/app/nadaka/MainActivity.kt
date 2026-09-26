@@ -55,8 +55,13 @@ object Settings {
     // Ego-motion (docs/ego-motion.md). Calibration knobs: measure FOV and stride on the real phone/user.
     var hfovDeg = 52f // portrait width of the analysis frame
     var vfovDeg = 67f // portrait height
-    val hfovRad get() = Math.toRadians(hfovDeg.toDouble()).toFloat()
-    val vfovRad get() = Math.toRadians(vfovDeg.toDouble()).toFloat()
+    @Volatile var zoom = 1f // current camera zoom (0.6 = ultra-wide); FOV-dependent geometry follows it
+    val hfovRad get() = zoomedFov(hfovDeg, zoom)
+    val vfovRad get() = zoomedFov(vfovDeg, zoom)
+    var wideZoom = 0.6f
+    var wideNearM = 2.0f // something this close (or half out of view) -> ultra-wide
+    var lensClearMs = 4000L // nothing close for this long -> main lens, to see far
+    var lensDwellMs = 3000L // minimum time between switches
     var yawSign = 1f // flip to -1 if boxes lose their track while turning
     var strideM = 0.7f // walk 10 m, count steps, stride = 10 / steps
     var stepWindowMs = 3000L
@@ -163,8 +168,11 @@ object Settings {
     var overheadGapM = 0.8f
 }
 
+@androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 class MainActivity : ComponentActivity() {
-    private lateinit var preview: PreviewView
+    private lateinit var preview: View // TextureView (Camera2 logical camera) or PreviewView (CameraX fallback)
+    private var wideId: String? = null
+    private var wide: WideCamera? = null
     private lateinit var hud: Hud
     private lateinit var root: FrameLayout
     private lateinit var gear: android.widget.Button
@@ -185,6 +193,8 @@ class MainActivity : ComponentActivity() {
     private var said = "" // last sentence spoken, shown as the caption
     private var saidLevel: Buzz? = null
     private val activity = ActivityDetector() // analysis thread only
+    private val lens = LensPolicy() // analysis thread only
+    private var minZoom = 1f
     private val memory = HazardMemory()
     @Volatile private var latestTracks = emptyList<Track>()
     @Volatile private var latestHazards = Hazards()
@@ -211,12 +221,14 @@ class MainActivity : ComponentActivity() {
     private val tiny = IntArray(64 * 48)
     private var reading = false // analysis thread only
     private var lastFrameMs = 0L
+    private var lastStatusLogMs = 0L // per-frame logging got the app's logs throttled by the OS
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Prefs.load(this)
-        preview = PreviewView(this).apply {
+        wideId = findWideCameraId(this)
+        preview = if (wideId != null) android.view.TextureView(this) else PreviewView(this).apply {
             scaleType = PreviewView.ScaleType.FIT_CENTER
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE // TextureView: lets us filter the image
         }
@@ -229,7 +241,11 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { if (settings.open) settings.hide() else settings.show() }
         }
         root = FrameLayout(this).apply {
-            addView(preview); addView(hud)
+            if (preview is android.view.TextureView) {
+                val w = resources.displayMetrics.widthPixels
+                addView(preview, FrameLayout.LayoutParams(w, w * 4 / 3, android.view.Gravity.CENTER))
+            } else addView(preview)
+            addView(hud)
             addView(gear, FrameLayout.LayoutParams(-2, -2, android.view.Gravity.TOP or android.view.Gravity.START).apply {
                 topMargin = (150 * resources.displayMetrics.density).toInt(); leftMargin = (16 * resources.displayMetrics.density).toInt()
             })
@@ -285,12 +301,38 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ego.start()
+        if (wide != null && checkSelfPermission(CAMERA) == PERMISSION_GRANTED) wide?.start()
         if (checkSelfPermission(RECORD_AUDIO) == PERMISSION_GRANTED) sounds.start()
     }
 
-    override fun onPause() { ego.stop(); sounds.stop(); super.onPause() }
+    override fun onPause() { ego.stop(); sounds.stop(); wide?.stop(); super.onPause() }
 
+    /**
+     * Logical camera (main + ultra-wide in one session) when the phone has one; CameraX otherwise.
+     * Lens changes are then just zoom ratio changes: no restart, no lost frames.
+     */
     private fun startCamera() {
+        val id = wideId
+        val tv = preview as? android.view.TextureView
+        if (id != null && tv != null) {
+            wide = WideCamera(this, id, tv, analysisThread, onFrame = ::onWideFrame) { why ->
+                Log.w(TAG, "lens: logical camera failed ($why)")
+                runOnUiThread { feedback.say("Camera problem. Restart the app.") }
+            }.also { minZoom = it.minZoom; if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) it.start() } // else onResume starts it
+            return
+        }
+        startCameraX()
+    }
+
+    private fun onWideFrame(frame: Bitmap) {
+        if (skipFrame()) return
+        process(frame, SystemClock.elapsedRealtime())
+    }
+
+    private fun setZoom(z: Float) { wide?.setZoom(z) ?: camera?.cameraControl?.setZoomRatio(z) }
+    private fun setTorch(on: Boolean) { wide?.setTorch(on) ?: camera?.cameraControl?.enableTorch(on) }
+
+    private fun startCameraX() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             // Same 4:3 aspect for preview and analysis so overlay boxes line up.
@@ -298,7 +340,7 @@ class MainActivity : ComponentActivity() {
             val previewUse = Preview.Builder()
                 .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(fourThree).build())
                 .build()
-                .also { it.setSurfaceProvider(preview.surfaceProvider) }
+                .also { it.setSurfaceProvider((preview as PreviewView).surfaceProvider) }
             val analysis = ImageAnalysis.Builder()
                 .setResolutionSelector(
                     ResolutionSelector.Builder()
@@ -314,7 +356,13 @@ class MainActivity : ComponentActivity() {
                 .also { it.setAnalyzer(analysisThread, ::analyze) }
             future.get().run {
                 unbindAll()
-                camera = bindToLifecycle(this@MainActivity, CameraSelector.DEFAULT_BACK_CAMERA, previewUse, analysis)
+                // Among listed cameras, prefer one that can zoom below 1x.
+                val selector = CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).addCameraFilter { infos ->
+                    infos.sortedBy { (it.zoomState.value?.minZoomRatio ?: 1f) }.take(1)
+                }.build()
+                camera = bindToLifecycle(this@MainActivity, selector, previewUse, analysis)
+                minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 1f
+                Log.i(TAG, "lens: zoom range $minZoom..${camera?.cameraInfo?.zoomState?.value?.maxZoomRatio}")
             }
         }, mainExecutor)
     }
@@ -440,6 +488,24 @@ class MainActivity : ComponentActivity() {
         if (!Settings.hapticsFirst) "Heard: " + alerts.joinToString(" ") { it.text }
         else alerts.joinToString("  ") { a -> a.short?.let { "Heard: $it" } ?: "Felt: ${a.text}" }
 
+    /** Ultra-wide for close quarters, main lens for far awareness and reading (Lens.kt). */
+    private fun chooseLens(now: Long, tracks: List<Track>) {
+        if (minZoom >= 1f) return // no ultra-wide on this phone
+        val trusted = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() }
+        val change = lens.update(
+            now, reading = reading, walking = activity.current == Activity.WALKING, finding = finder != null,
+            nearestM = trusted.minOfOrNull { it.metres } ?: Float.NaN,
+            edgeNear = trusted.any { it.edge && it.metres < Settings.wideNearM },
+        ) ?: return
+        val z = if (change) maxOf(minZoom, Settings.wideZoom) else 1f
+        setZoom(z)
+        Settings.zoom = z
+        // Geometry changed: boxes jump and the depth ruler no longer fits. Start both fresh.
+        tracker.reset()
+        depthAnalyzer.relearn()
+        Log.i(TAG, "lens: ${if (change) "ultra-wide" else "main"} ($z x)")
+    }
+
     private fun checkBattery(now: Long) {
         if (batterySaid || now - lastBatteryCheckMs < 60_000) return
         lastBatteryCheckMs = now
@@ -448,10 +514,15 @@ class MainActivity : ComponentActivity() {
         if (pct <= Settings.lowBatteryPct) { batterySaid = true; feedback.say("Battery $pct percent. Charge soon.", strong = true) }
     }
 
-    private fun analyze(image: ImageProxy) {
-        // Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further.
+    /** Work less when it matters less: standing = every 2nd frame, vehicle = every 4th; heat can only slow further. */
+    private fun skipFrame(): Boolean {
         val modeStride = when (activity.current) { Activity.WALKING -> 1; Activity.STILL -> 2; Activity.SITTING -> 3; Activity.VEHICLE -> 4 }
-        if (frameCount++ % maxOf(heat.tier.detectEvery, modeStride) != 0 && !reading) { image.close(); return }
+        return frameCount++ % maxOf(heat.tier.detectEvery, modeStride) != 0 && !reading
+    }
+
+    /** CameraX fallback path. */
+    private fun analyze(image: ImageProxy) {
+        if (skipFrame()) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
             val bmp = it.toBitmap()
@@ -459,6 +530,10 @@ class MainActivity : ComponentActivity() {
             if (rot == 0) bmp
             else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
         }
+        process(frame, t0)
+    }
+
+    private fun process(frame: Bitmap, t0: Long) {
         val t1 = SystemClock.elapsedRealtime()
         if (reading) {
             val (speech, done) = reader.step(frame)
@@ -494,8 +569,9 @@ class MainActivity : ComponentActivity() {
             depthMs = SystemClock.elapsedRealtime() - d0
         }
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
-        if (health == Health.DARK && !torchOn) { torchOn = true; camera?.cameraControl?.enableTorch(true) }
-        else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
+        if (health == Health.DARK && !torchOn) { torchOn = true; setTorch(true) }
+        else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; setTorch(false) }
+        chooseLens(t2, tracks)
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
         latestHazards = hazards
@@ -519,9 +595,9 @@ class MainActivity : ComponentActivity() {
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
         lastFrameMs = t2
         val rec = if (egoLog.recording) "REC${if (egoLog.label == 1) " +" else ""}" else ""
-        Log.d(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}")
+        if (t2 - lastStatusLogMs > 5000) { lastStatusLogMs = t2; Log.i(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}") }
         val st = HudState(
-            mode = activity.current.name, heat = heat.tier, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
+            mode = activity.current.name, heat = heat.tier, lens = Settings.zoom, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
         )

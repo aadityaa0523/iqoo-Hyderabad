@@ -13,7 +13,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.camera.view.PreviewView
 
 /**
  * Screen palettes for low-vision users. Every text/background pair is >= 7:1 contrast (WCAG AAA):
@@ -84,7 +83,7 @@ object Prefs {
 }
 
 /** Camera preview filter: contrast boost (edges stand out) or colour inversion; or hide the image. */
-fun applyCameraView(preview: PreviewView) {
+fun applyCameraView(preview: View) {
     preview.visibility = if (Prefs.camera == CameraView.HIDDEN) View.INVISIBLE else View.VISIBLE
     val m = when (Prefs.camera) {
         CameraView.HIGH_CONTRAST -> ColorMatrix().apply {
@@ -94,7 +93,9 @@ fun applyCameraView(preview: PreviewView) {
         CameraView.INVERTED -> ColorMatrix(floatArrayOf(-1f, 0f, 0f, 0f, 255f, 0f, -1f, 0f, 0f, 255f, 0f, 0f, -1f, 0f, 255f, 0f, 0f, 0f, 1f, 0f))
         else -> null
     }
-    preview.setLayerType(if (m == null) View.LAYER_TYPE_NONE else View.LAYER_TYPE_HARDWARE, m?.let { Paint().apply { colorFilter = ColorMatrixColorFilter(it) } })
+    val paint = m?.let { Paint().apply { colorFilter = ColorMatrixColorFilter(it) } }
+    if (preview is android.view.TextureView) preview.setLayerPaint(paint) // TextureView is always a hardware layer
+    else preview.setLayerType(if (m == null) View.LAYER_TYPE_NONE else View.LAYER_TYPE_HARDWARE, paint)
 }
 
 /**
