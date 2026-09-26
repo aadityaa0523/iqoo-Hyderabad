@@ -30,6 +30,17 @@ class AlertPolicyTest {
         assertTrue(!t.sure)
     }
 
+    @Test fun neverSaysMaybe() {
+        // Unsure objects in every situation: approaching, touching, close, far, moving, at the edge.
+        val unsure = listOf(
+            track(1, "person", approaching = true, metres = 3f), track(2, metres = 0.5f), track(3, metres = 1.2f),
+            track(4, metres = 4f), track(5, "dog", metres = 6f).also { it.objSpeed = 1f },
+        ).onEach { it.score = 0.2f }
+        val said = chatty { (0..5).flatMap { i -> AlertPolicy().say(unsure.drop(i), 0, hz = Hazards(dropAtM = 1f)) } } +
+            Answers.safety(listOf("person approaching, 1 o'clock")) + Answers.describe(unsure, Hazards())
+        said.forEach { assertTrue("says maybe: $it", "maybe" !in it.lowercase()) }
+    }
+
     @Test fun oneFrameFlickerIsIgnored() {
         assertEquals(emptyList<String>(), AlertPolicy().say(listOf(track(1, hits = 1)), 0))
     }
