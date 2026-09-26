@@ -7,6 +7,7 @@
 - Inference order: QNN (NPU) delegate, then GPU, then CPU. Always show which one loaded.
 - Decisions are deterministic rules. Never guess a medicine or a note: low confidence -> "Can't read clearly".
 - All thresholds live in the `Settings` object (MainActivity.kt).
+- Ego-motion: `EgoMotion.kt` (gyro yaw + step-detector speed, record-mode CSV logger), `Tracker.kt` (gyro-compensated tracking, looming TTC, speed toward user minus own walking, optional `assets/ego_model.json` classifier from `training/train_ego.py`). Design: `docs/ego-motion.md`.
 - Log with tag `NADAKA`.
 - Build + install: `./gradlew installDebug` (JAVA_HOME = `C:\Program Files\Android\Android Studio\jbr`). Logs: `adb logcat -s NADAKA` (adb is in `%LOCALAPPDATA%\Android\Sdk\platform-tools`).
 - Push to `main` -> GitHub Actions builds the APK -> release `latest` (install from the phone browser during Red Light).

@@ -2,7 +2,6 @@ package app.nadaka
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.RectF
 import android.util.Log
 import com.qualcomm.qti.QnnDelegate
 import org.tensorflow.lite.Interpreter
@@ -14,7 +13,7 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
 /** box is normalised 0..1 in the (rotated, upright) frame. */
-data class Detection(val label: String, val score: Float, val box: RectF)
+data class Detection(val label: String, val score: Float, val box: Box)
 
 /**
  * YOLOX (Qualcomm AI Hub, int8 w8a8, 640x640) -> boxes [x1,y1,x2,y2] px, scores, class_idx; we do NMS.
@@ -76,27 +75,19 @@ class Detector(ctx: Context) {
             if (score < minScore) continue
             fun c(k: Int) = (bs * ((boxes.get(4 * i + k).toInt() and 0xFF) - bz) / size).coerceIn(0f, 1f)
             val label = labels.getOrElse(classes.get(i).toInt() and 0xFF) { "object" }
-            found += Detection(label, score, RectF(c(0), c(1), c(2), c(3)))
+            found += Detection(label, score, Box(c(0), c(1), c(2), c(3)))
         }
         return nms(found)
     }
 
     /** Class-aware greedy NMS. ponytail: O(n^2), fine for the few hundred boxes above threshold. */
-    private fun nms(dets: List<Detection>, iou: Float = 0.45f, max: Int = 25): List<Detection> {
+    private fun nms(dets: List<Detection>, maxIou: Float = 0.45f, max: Int = 25): List<Detection> {
         val kept = ArrayList<Detection>()
         for (d in dets.sortedByDescending { it.score }) {
             if (kept.size == max) break
-            if (kept.none { it.label == d.label && iou(it.box, d.box) > iou }) kept += d
+            if (kept.none { it.label == d.label && iou(it.box, d.box) > maxIou }) kept += d
         }
         return kept
-    }
-
-    private fun iou(a: RectF, b: RectF): Float {
-        val w = minOf(a.right, b.right) - maxOf(a.left, b.left)
-        val h = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
-        if (w <= 0 || h <= 0) return 0f
-        val inter = w * h
-        return inter / (a.width() * a.height() + b.width() * b.height() - inter)
     }
 
     /** Hexagon NPU (QNN HTP), then GPU, then CPU. */
