@@ -92,6 +92,8 @@ object Settings {
     var heatCalmMs = 20000L // calm needed before stepping down a tier
 
     // Voice questions (Voice.kt)
+    var gemmaModelFile = "gemma-4-E2B-it.litertlm" // copied from Edge Gallery into Nadaka's files dir
+    var gemmaImagePx = 512
     var voiceLanguage = "en-US" // the offline speech pack installed on the loaner phone
     var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
 
@@ -173,6 +175,8 @@ class MainActivity : ComponentActivity() {
     @Volatile private var latestTracks = emptyList<Track>()
     @Volatile private var latestHazards = Hazards()
     private lateinit var voice: VoiceInput
+    private lateinit var gemma: Gemma
+    @Volatile private var latestFrame: Bitmap? = null
     private var camera: Camera? = null
     private var torchOn = false
     private var frameCount = 0
@@ -208,6 +212,7 @@ class MainActivity : ComponentActivity() {
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
         else registerForActivityResult(RequestMultiplePermissions()) { if (it[CAMERA] == true) startCamera() }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
+        gemma = Gemma(this).also { it.load() }
         voice = VoiceInput(this, onReady = { feedback.readyCue() }, onText = ::answer) { why ->
             Log.i(TAG, "voice failed: $why")
             feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
@@ -280,17 +285,44 @@ class MainActivity : ComponentActivity() {
         Log.i(TAG, "asked: $alternatives -> $ask")
         val reply = when (ask) {
             Ask.SAFETY -> Answers.safety(memory.recent())
-            Ask.DESCRIBE -> Answers.describe(latestTracks, latestHazards)
+            Ask.DESCRIBE -> {
+                val facts = Answers.describe(latestTracks, latestHazards)
+                if (askGemma(Gemma.describePrompt(if (facts.startsWith("I don't")) "" else facts), fallback = facts)) return
+                facts
+            }
+            Ask.SIGN -> {
+                if (askGemma(Gemma.READ_PROMPT, fallback = "I can't read it clearly.")) return
+                analysisThread.execute { if (!reading) { reader.start(); reading = true } }
+                "Reading. Hold it in front of the camera."
+            }
             Ask.READ -> { analysisThread.execute { if (!reading) { reader.start(); reading = true } }; "Reading. Hold it in front of the camera." }
             Ask.SPEECH -> { Settings.hapticsFirst = false; "OK, I'll speak every alert." }
             Ask.HAPTIC -> { Settings.hapticsFirst = true; "OK, vibration first. I'll only speak for danger." }
             Ask.LEARN -> { feedback.lesson(); return }
             Ask.CHATTY -> { Settings.chatty = true; "OK, I'll tell you more." }
             Ask.QUIET -> { Settings.chatty = false; "OK, only important things." }
-            Ask.HELP -> if (text.isBlank()) HELP_TEXT else "I heard: $text. $HELP_TEXT"
+            Ask.HELP -> {
+                if (text.isNotBlank() && askGemma(Gemma.questionPrompt(text), fallback = "I heard: $text. $HELP_TEXT")) return
+                if (text.isBlank()) HELP_TEXT else "I heard: $text. $HELP_TEXT"
+            }
         }
         feedback.say(reply, strong = ask == Ask.SAFETY)
         said = reply
+    }
+
+    /**
+     * Sends a question plus the current camera frame to local Gemma. Returns false if Gemma isn't ready.
+     * The answer is spoken only if it contains no movement green-light; otherwise [fallback] is.
+     */
+    private fun askGemma(prompt: String, fallback: String): Boolean {
+        if (!gemma.ready) { Log.i(TAG, "gemma not ready: ${gemma.status}"); return false }
+        feedback.say("Looking.")
+        said = "Gemma is looking…"
+        gemma.ask(prompt, latestFrame) { reply ->
+            val safe = reply?.takeIf { !SafetyGate.greenLight(it) } ?: fallback
+            runOnUiThread { feedback.say(safe); said = "Gemma: $safe" }
+        }
+        return true
     }
 
     /** What the sighted view shows: what the user heard, or felt when it was vibration only. */
@@ -327,6 +359,7 @@ class MainActivity : ComponentActivity() {
             hud.post { hud.show(st) }
             return
         }
+        latestFrame = frame
         val dets = detector.detect(frame, Settings.minScore)
         val t2 = SystemClock.elapsedRealtime()
         val motion = ego.snapshot()

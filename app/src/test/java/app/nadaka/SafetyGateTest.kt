@@ -49,6 +49,19 @@ class SafetyGateTest {
         assertEquals(emptyList<String>(), m.recent())
     }
 
+    @Test fun gemmaGreenLightsAreCaught() {
+        listOf("The path is clear, you can go ahead.", "It's safe to cross now.", "There are no obstacles.", "The way looks clear.")
+            .forEach { assertTrue("missed: $it", SafetyGate.greenLight(it)) }
+        listOf("A chair at 12 o'clock, about 2 metres.", "A sign reading Exit, 1 o'clock.")
+            .forEach { assertFalse("false alarm: $it", SafetyGate.greenLight(it)) }
+    }
+
+    @Test fun signIntent() {
+        assertEquals(Ask.SIGN, intentOf("read the sign"))
+        assertEquals(Ask.SIGN, intentOf("what does it say"))
+        assertEquals(Ask.READ, intentOf("read this note"))
+    }
+
     @Test fun commonRecognizerSlipsStillWork() {
         assertEquals(Ask.DESCRIBE, intentOf("What's a head?"))
         assertEquals(Ask.DESCRIBE, intentOf("watts ahead"))

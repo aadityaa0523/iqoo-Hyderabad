@@ -12,3 +12,6 @@
 - Build + install: `./gradlew installDebug` (JAVA_HOME = `C:\Program Files\Android\Android Studio\jbr`). Logs: `adb logcat -s NADAKA` (adb is in `%LOCALAPPDATA%\Android\Sdk\platform-tools`).
 - Push to `main` -> GitHub Actions builds the APK -> release `latest` (install from the phone browser during Red Light).
 - Small changes, commit after each working milestone, never leave the build broken.
+- Local Gemma: `Gemma.kt` runs Gemma 4 E2B (`.litertlm`, from Google AI Edge Gallery) with LiteRT-LM on the GPU, for "what's ahead?", sign reading and free questions. Never for safety (SafetyGate first; answers filtered by `SafetyGate.greenLight`). Put the model on a phone (app must have run once so it owns its folder):
+  `adb shell am start -n app.nadaka/.MainActivity` then
+  `adb shell cp /sdcard/Android/data/com.google.ai.edge.gallery/files/Gemma_4_E2B_it/*/gemma-4-E2B-it.litertlm /sdcard/Android/data/app.nadaka/files/`

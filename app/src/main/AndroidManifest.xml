@@ -19,6 +19,8 @@
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <!-- FastRPC to the Hexagon DSP/NPU, needed by the QNN HTP backend. -->
         <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <!-- LiteRT-LM GPU backend for Gemma. -->
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
 
         <activity
             android:name=".MainActivity"

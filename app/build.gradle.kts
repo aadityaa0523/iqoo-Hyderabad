@@ -55,5 +55,6 @@ dependencies {
     val qnn = "2.50.0" // Qualcomm Hexagon NPU delegate for LiteRT
     implementation("com.qualcomm.qti:qnn-litert-delegate:$qnn")
     implementation("com.qualcomm.qti:qnn-runtime:$qnn")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.17.1") // local Gemma (.litertlm) runtime
     testImplementation("junit:junit:4.13.2")
 }

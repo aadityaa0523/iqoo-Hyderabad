@@ -38,6 +38,15 @@ object SafetyGate {
         "సురక్షిత", "దాట", "వెళ్ళవచ్చా", "వెళ్ళగలనా", "నడవవచ్చా", "ముందు ఏమైనా",
     )
 
+    // A language model must never talk anyone into moving. Any answer containing these is discarded.
+    private val greenLights = Regex(
+        """\b(safe to (cross|walk|go|move|proceed)|you can (go|cross|walk|move|proceed|continue)|go ahead|""" +
+            """(path|way|road|street) (is|looks) (clear|free|safe|open)|all clear|it'?s clear|it is clear|""" +
+            """no obstacles?|nothing (in|blocking) (your|the) (way|path)|it'?s safe|it is safe)\b"""
+    )
+
+    fun greenLight(answer: String) = greenLights.containsMatchIn(answer.lowercase())
+
     fun isSafetyQuestion(text: String): Boolean {
         val t = " ${text.lowercase().trim()} "
         return patterns.any { it.containsMatchIn(t) } || words.any { it in t }
@@ -86,7 +95,7 @@ object Answers {
     }
 }
 
-enum class Ask { SAFETY, DESCRIBE, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
+enum class Ask { SAFETY, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 /** Typical recognizer slips on short commands, normalised before matching. */
@@ -108,6 +117,7 @@ fun intentOf(text: String): Ask {
     val t = normalise(text)
     if (SafetyGate.isSafetyQuestion(t)) return Ask.SAFETY
     return when {
+        Regex("""\b(sign|signs|board|written|writing|label|poster|menu|text|what does (it|that|this) say)\b""").containsMatchIn(t) -> Ask.SIGN
         Regex("""\b(read|money|note|notes|rupee|rupees|medicine|tablet|strip|currency|cash|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
         Regex("""\b(teach|learn|lesson)\b|\bvibrations?\b.*\bmean""").containsMatchIn(t) -> Ask.LEARN
         Regex("""\b(use speech|speak to me|talk to me|voice mode|speech mode|speak everything)""").containsMatchIn(t) -> Ask.SPEECH
