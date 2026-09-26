@@ -192,7 +192,7 @@ class Hud(ctx: Context) : View(ctx) {
         fill.color = when (s.level) { Buzz.WARN, Buzz.APPROACH -> red; Buzz.AHEAD -> orange; else -> amber }
         c.drawRoundRect(RectF(box.left + 12 * dp, top + 16 * dp, box.left + 17 * dp, top + 80 * dp), 3 * dp, 3 * dp, fill)
         body.textSize = 11 * dp
-        c.drawText("SPEAKING TO THE USER", box.left + 30 * dp, top + 26 * dp, body)
+        c.drawText(if (Settings.hapticsFirst) "WHAT THE USER FEELS AND HEARS  ·  vibration first" else "WHAT THE USER HEARS", box.left + 30 * dp, top + 26 * dp, body)
         bold.textSize = 19 * dp
         var line = ""
         var y = top + 54 * dp

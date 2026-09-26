@@ -82,7 +82,7 @@ object Answers {
     }
 }
 
-enum class Ask { SAFETY, DESCRIBE, READ, CHATTY, QUIET, HELP }
+enum class Ask { SAFETY, DESCRIBE, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 fun intentOf(text: String): Ask {
@@ -90,6 +90,9 @@ fun intentOf(text: String): Ask {
     val t = text.lowercase()
     return when {
         Regex("""\b(read|money|note|rupee|medicine|tablet|strip|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
+        Regex("""\b(teach|learn|lesson)\b|\bvibrations?\b.*\bmean""").containsMatchIn(t) -> Ask.LEARN
+        Regex("""\b(use speech|speak to me|talk to me|voice mode|speech mode)""").containsMatchIn(t) -> Ask.SPEECH
+        Regex("""\b(use vibration|vibration mode|vibrate only|haptic)""").containsMatchIn(t) -> Ask.HAPTIC
         Regex("""\b(talk more|more detail|chatty|tell me everything)""").containsMatchIn(t) -> Ask.CHATTY
         Regex("""\b(quiet|less|silent|shut up|stop talking)""").containsMatchIn(t) -> Ask.QUIET
         Regex("""\b(what|see|ahead|around|front|describe|kya hai|dikh)""").containsMatchIn(t) || "क्या" in t || "ఏమి" in t -> Ask.DESCRIBE
@@ -97,7 +100,7 @@ fun intentOf(text: String): Ask {
     }
 }
 
-const val HELP_TEXT = "You can ask: what's ahead, read this, or tell me less."
+const val HELP_TEXT = "You can ask: what's ahead, is it safe, read this, use speech, use vibration, or teach me the vibrations."
 
 /** On-device speech recognition (no network). One utterance per [listen] call; main thread only. */
 class VoiceInput(ctx: Context, private val onText: (String) -> Unit, private val onFail: () -> Unit) : RecognitionListener {

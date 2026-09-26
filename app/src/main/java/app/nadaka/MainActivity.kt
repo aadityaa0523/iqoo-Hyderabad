@@ -101,6 +101,8 @@ object Settings {
     var movingMps = 0.6f // below this, box jitter, not motion
 
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
+    var hapticsFirst = true // vibration carries routine alerts; speech only for "Stop. Drop." etc. (docs/haptics.md)
+    var pulseMaxM = 3f // proximity ticks start when something in the path is this close
     var chatty = false // true = static objects at any distance, not just within staticRangeM
     var staticRangeM = 5f  // announce static objects within this range (once each)
     var staticPathDeg = 30f // ...and roughly ahead: things far to the side don't block the way
@@ -265,6 +267,9 @@ class MainActivity : ComponentActivity() {
             Ask.SAFETY -> Answers.safety(memory.recent())
             Ask.DESCRIBE -> Answers.describe(latestTracks, latestHazards)
             Ask.READ -> { analysisThread.execute { if (!reading) { reader.start(); reading = true } }; "Reading. Hold it in front of the camera." }
+            Ask.SPEECH -> { Settings.hapticsFirst = false; "OK, I'll speak every alert." }
+            Ask.HAPTIC -> { Settings.hapticsFirst = true; "OK, vibration first. I'll only speak for danger." }
+            Ask.LEARN -> { feedback.lesson(); return }
             Ask.CHATTY -> { Settings.chatty = true; "OK, I'll tell you more." }
             Ask.QUIET -> { Settings.chatty = false; "OK, only important things." }
             Ask.HELP -> HELP_TEXT
@@ -272,6 +277,11 @@ class MainActivity : ComponentActivity() {
         feedback.say(reply, strong = intentOf(text) == Ask.SAFETY)
         said = reply
     }
+
+    /** What the sighted view shows: what the user heard, or felt when it was vibration only. */
+    private fun caption(alerts: List<Alert>): String =
+        if (!Settings.hapticsFirst) "Heard: " + alerts.joinToString(" ") { it.text }
+        else alerts.joinToString("  ") { a -> a.short?.let { "Heard: $it" } ?: "Felt: ${a.text}" }
 
     private fun checkBattery(now: Long) {
         if (batterySaid || now - lastBatteryCheckMs < 60_000) return
@@ -329,7 +339,14 @@ class MainActivity : ComponentActivity() {
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
         latestHazards = hazards
-        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text }; saidLevel = it.maxOf { a -> a.buzz } }
+        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+
+        // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
+        if (activity.current != Activity.VEHICLE && !policy.blind) {
+            val inPathM = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() && inPath(it) && (it.sure || it.metres < Settings.veryCloseM) }
+                .minOfOrNull { it.metres }
+            feedback.haptics.proximity(listOfNotNull(inPathM, hazards.floorObstacleAtM).minOrNull() ?: Float.NaN)
+        }
         checkBattery(t2)
         pollHeat(t2)
         heat.update(t2, getSystemService(PowerManager::class.java).currentThermalStatus, headroom, batteryC,
@@ -351,6 +368,8 @@ class MainActivity : ComponentActivity() {
 /** Speech + vibration output. What to say is decided by AlertPolicy. */
 class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     private val tts = TextToSpeech(ctx, this)
+    val haptics = Haptics(ctx)
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private val vibrator = ctx.getSystemService(VibratorManager::class.java).defaultVibrator
     private val side = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
     private val ahead = VibrationEffect.createWaveform(longArrayOf(0, 80, 80, 80), -1)
@@ -368,8 +387,27 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
         if (strong) vibrator.vibrate(result)
     }
 
-    /** Most urgent first; the strongest buzz of the batch. */
+    /** Plays each pattern with its meaning: speak, pause, vibrate. About 20 s. */
+    fun lesson() {
+        LESSON.forEachIndexed { i, (words, tacton) ->
+            main.postDelayed({ tts.speak(words, TextToSpeech.QUEUE_FLUSH, null, "lesson$i") }, i * 4500L)
+            main.postDelayed({ if (tacton == Tacton.TICK) repeat(4) { k -> main.postDelayed({ haptics.play(Tacton.TICK) }, k * 350L) } else haptics.play(tacton) }, i * 4500L + 2800)
+        }
+    }
+
+    /** Haptics-first: the most urgent pattern, plus only the short words that must be heard. */
     fun play(alerts: List<Alert>) {
+        if (Settings.hapticsFirst) {
+            alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
+            val words = alerts.mapNotNull { it.short }
+            if (words.isNotEmpty()) tts.speak(words.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "short")
+            return
+        }
+        speakAll(alerts)
+    }
+
+    /** Speech mode: full sentences, most urgent first; the strongest buzz of the batch. */
+    private fun speakAll(alerts: List<Alert>) {
         alerts.forEachIndexed { i, a -> tts.speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
         vibrator.vibrate(
             when (alerts.maxOf { it.buzz.ordinal }) {

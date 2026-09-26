@@ -7,7 +7,11 @@ import kotlin.math.roundToInt
 /** How a message should feel in the hand. */
 enum class Buzz { SIDE, AHEAD, APPROACH, WARN }
 
-data class Alert(val text: String, val buzz: Buzz)
+/**
+ * [text] is the full sentence (speech mode, caption, "what's ahead"). In haptics mode (default) the
+ * [tacton] carries the meaning and only [short] is spoken; null = vibration only (docs/haptics.md).
+ */
+data class Alert(val text: String, val buzz: Buzz, val tacton: Tacton? = null, val short: String? = null)
 
 /** Is the camera image usable at all? Checked before trusting any detection. */
 enum class Health(val message: String) {
@@ -62,7 +66,7 @@ data class Hazards(
 
 private fun name(t: Track) = t.label
 
-private fun inPath(t: Track, halfDeg: Float = Settings.pathHalfDeg) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < halfDeg
+fun inPath(t: Track, halfDeg: Float = Settings.pathHalfDeg) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < halfDeg
 
 /** "2.5 metres", "1 metre", "very close"; "" when unknown. */
 fun metres(m: Float): String {
@@ -108,7 +112,7 @@ class AlertPolicy {
         if (health != Health.OK && now - healthSince >= Settings.healthPersistMs) {
             if (healthSaid != health || now - healthSaidMs > Settings.healthRepeatMs) {
                 healthSaid = health; healthSaidMs = now
-                return listOf(Alert(health.message, Buzz.WARN))
+                return listOf(Alert(health.message, Buzz.WARN, Tacton.CANT_SEE, health.message))
             }
             return emptyList() // detections from a bad image are not trusted
         }
@@ -125,12 +129,12 @@ class AlertPolicy {
 
         // Depth hazards: the things a cane can't find in time.
         hz.dropAtM?.takeIf { walking || it < closeRange }?.let {
-            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN) }
+            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Stop. Drop.") }
         }
         hz.overheadAtM?.takeIf { walking || it < closeRange }?.let {
             if (now - lastOverheadMs >= Settings.hazardRepeatMs) {
                 lastOverheadMs = now
-                out += Alert(phrase("Head height obstacle", metres(it), clock(hz.overheadBearing)), Buzz.WARN)
+                out += Alert(phrase("Head height obstacle", metres(it), clock(hz.overheadBearing)), Buzz.WARN, Tacton.HEAD, "Head.")
             }
         }
 
@@ -138,7 +142,7 @@ class AlertPolicy {
         val coming = stable.filter { it.approaching }.minByOrNull { it.ttc }
         if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
             lastApproachMs = now
-            out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH)
+            out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH, Tacton.APPROACH)
         }
 
         // Close by: repeats while close, even if already announced (it is a collision risk).
