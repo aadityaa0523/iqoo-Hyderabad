@@ -98,7 +98,7 @@ object Settings {
 
     // Voice questions (Voice.kt)
     var gemmaModelFile = "gemma-4-E2B-it.litertlm" // copied from Edge Gallery into Nadaka's files dir
-    var gemmaImagePx = 512
+    var gemmaImagePx = 1024 // Gemma sees the full preview, not the 640x480 analysis frame
     var listenWindowMs = 8000L // after a press, wait this long for the user to start talking
     var soundMinScore = 0.35f // YAMNet score for horn / siren / bell / reversing / bark
     var soundRepeatMs = 8000L
@@ -140,6 +140,7 @@ object Settings {
     var closeRepeatMs = 4000L
     var veryCloseM = 0.75f
     var hazardRepeatMs = 3500L
+    var answerGapMs = 3000L // after an answer (Gemma, "what's ahead"): no routine speech for this long, vibration only
 
     // Depth (Depth.kt). cameraHeightM is THE calibration knob: measure lens height on the wearer.
     var depthEvery = 2 // run the depth model every Nth analysed frame
@@ -173,11 +174,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var preview: View // TextureView (Camera2 logical camera) or PreviewView (CameraX fallback)
     private var wideId: String? = null
     private var wide: WideCamera? = null
-    private lateinit var hud: Hud
-    private lateinit var root: FrameLayout
-    private lateinit var gear: android.widget.Button
-    private lateinit var settings: SettingsPanel
+    private lateinit var screen: app.nadaka.ui.LiveScreen
     private lateinit var feedback: Feedback
+    private var motionMissing = false
     private val analysisThread = Executors.newSingleThreadExecutor()
     private val detector by lazy { Detector(this) } // created on the analysis thread
     private val reader by lazy { Reader() } // analysis thread only
@@ -189,6 +188,21 @@ class MainActivity : ComponentActivity() {
     private val depthAnalyzer = DepthAnalyzer()
     private var hazards = Hazards()
     private var depthMs = 0L
+    private var depthReady = false // the depth model has produced at least one map
+
+    // Layer 3 drop-off. The iQOO has no barometer: the pipeline then runs on vision + depth alone.
+    private val sensors by lazy { getSystemService(android.hardware.SensorManager::class.java) }
+    private val pressure by lazy { sensors.getDefaultSensor(android.hardware.Sensor.TYPE_PRESSURE) }
+    private val drop by lazy {
+        val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        app.nadaka.drop.DropPipeline(pressure != null, if (debuggable) java.io.File(getExternalFilesDir(null), "drop_log.csv") else null)
+    }
+    private var dropOut: app.nadaka.drop.DropOutput? = null
+    private var dropSaidMs = -1_000_000L
+    private val baroListener = object : android.hardware.SensorEventListener {
+        override fun onSensorChanged(e: android.hardware.SensorEvent) = drop.barometer.update(e.values[0])
+        override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) = Unit
+    }
     private var depthFrames = 0
     private var said = "" // last sentence spoken, shown as the caption
     private var saidLevel: Buzz? = null
@@ -232,51 +246,35 @@ class MainActivity : ComponentActivity() {
             scaleType = PreviewView.ScaleType.FIT_CENTER
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE // TextureView: lets us filter the image
         }
-        hud = Hud(this)
-        settings = SettingsPanel(this, say = { feedback.say(it) }, onChange = ::applyDisplay, onLesson = { feedback.lesson() })
-        val gear = android.widget.Button(this).apply {
-            text = "Settings"
-            isAllCaps = false
-            contentDescription = "Settings"
-            setOnClickListener { if (settings.open) settings.hide() else settings.show() }
-        }
-        root = FrameLayout(this).apply {
-            if (preview is android.view.TextureView) {
-                val w = resources.displayMetrics.widthPixels
-                addView(preview, FrameLayout.LayoutParams(w, w * 4 / 3, android.view.Gravity.CENTER))
-            } else addView(preview)
-            addView(hud)
-            addView(gear, FrameLayout.LayoutParams(-2, -2, android.view.Gravity.TOP or android.view.Gravity.START).apply {
-                topMargin = (150 * resources.displayMetrics.density).toInt(); leftMargin = (16 * resources.displayMetrics.density).toInt()
-            })
-            // Above the navigation bar; the panel has its own Done, so the Settings button hides while it is open.
-            addView(settings.view, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.BOTTOM).apply {
-                bottomMargin = (56 * resources.displayMetrics.density).toInt()
-            })
-        }
-        this.gear = gear
-        settings.onOpenChange = { open -> gear.visibility = if (open) android.view.View.GONE else android.view.View.VISIBLE }
-        setContentView(root)
         feedback = Feedback(this)
+        screen = app.nadaka.ui.LiveScreen(this, preview, app.nadaka.ui.Actions(
+            say = { feedback.say(it) },
+            testHaptic = { feedback.haptics.test() },
+            testAudio = { feedback.test() },
+            lesson = { feedback.lesson() },
+            displayChanged = ::applyDisplay,
+            recordToggle = ::toggleRecording,
+            openBenchmark = { startActivity(Intent(this, BenchActivity::class.java)) },
+        ))
+        setContentView(screen.root)
         applyDisplay()
-        if (!Prefs.wizardDone) hud.post { settings.show(wizard = true) }
+        if (!Prefs.wizardDone) screen.root.post { screen.settings.show(wizard = true) }
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { if (!screen.back()) finish() }
+        })
+        motionMissing = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) == null
         ego = EgoMotion(this)
         egoLog = EgoLog(this)
-        // Record mode for ego-motion training data (team only; blind users never need it).
-        hud.setOnLongClickListener {
-            analysisThread.execute {
-                if (egoLog.recording) { egoLog.stop(); feedback.say("Recording saved.") }
-                else { egoLog.start(); feedback.say("Recording. Volume up marks approaching.") }
-            }
-            true
-        }
 
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
-        else registerForActivityResult(RequestMultiplePermissions()) { if (it[CAMERA] == true) startCamera() }
+        else registerForActivityResult(RequestMultiplePermissions()) {
+            if (it[CAMERA] == true) startCamera() else screen.cameraError("Camera permission is off.")
+        }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
         gemma = Gemma(this).also { it.load() }
         emergency = Emergency(this)
         sounds = SoundWatch(this, paused = { voice.listening || emergency.active }) { d -> runOnUiThread { heard(d) } }
+        feedback.listening = { voice.listening }
         voice = VoiceInput(this, onReady = { feedback.readyCue() }, onText = ::answer) { why ->
             Log.i(TAG, "voice failed: $why")
             feedback.say(if (why == "no speech heard" || why == "no match") "I didn't catch that. Press volume up, wait for the buzz, then speak."
@@ -284,28 +282,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Palette, text size and camera filter changed: repaint everything (live preview in the settings). */
-    private fun applyDisplay() {
-        applyCameraView(preview)
-        root.setBackgroundColor(if (Prefs.palette.highContrast) Prefs.palette.bg else android.graphics.Color.BLACK)
-        val p = Prefs.palette
-        gear.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18f * Prefs.textScale)
-        gear.setTextColor(if (p.highContrast) p.bg else 0xFF101820.toInt())
-        gear.background = android.graphics.drawable.GradientDrawable().apply {
-            setColor(if (p.highContrast) p.fg else 0xFFFFB300.toInt()); cornerRadius = 40f
-            setStroke(6, if (p.highContrast) p.bg else android.graphics.Color.WHITE)
-        }
-        hud.invalidate()
+    /** Camera filter changed (the screen restyles itself). */
+    private fun applyDisplay() = applyCameraView(preview)
+
+    /** Record mode for ego-motion training data (team only; long-press the camera view). */
+    private fun toggleRecording() = analysisThread.execute {
+        if (egoLog.recording) { egoLog.stop(); feedback.say("Recording saved.") }
+        else { egoLog.start(); feedback.say("Recording. Volume up marks approaching.") }
     }
 
     override fun onResume() {
         super.onResume()
         ego.start()
+        screen.resumed()
+        pressure?.let { sensors.registerListener(baroListener, it, android.hardware.SensorManager.SENSOR_DELAY_NORMAL) }
         if (wide != null && checkSelfPermission(CAMERA) == PERMISSION_GRANTED) wide?.start()
         if (checkSelfPermission(RECORD_AUDIO) == PERMISSION_GRANTED) sounds.start()
     }
 
-    override fun onPause() { ego.stop(); sounds.stop(); wide?.stop(); super.onPause() }
+    override fun onPause() { ego.stop(); sensors.unregisterListener(baroListener); sounds.stop(); wide?.stop(); super.onPause() }
 
     /**
      * Logical camera (main + ultra-wide in one session) when the phone has one; CameraX otherwise.
@@ -318,6 +313,7 @@ class MainActivity : ComponentActivity() {
             wide = WideCamera(this, id, tv, analysisThread, onFrame = ::onWideFrame) { why ->
                 Log.w(TAG, "lens: logical camera failed ($why)")
                 runOnUiThread { feedback.say("Camera problem. Restart the app.") }
+                screen.cameraError("The camera could not open.")
             }.also { minZoom = it.minZoom; if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) it.start() } // else onResume starts it
             return
         }
@@ -326,7 +322,7 @@ class MainActivity : ComponentActivity() {
 
     private fun onWideFrame(frame: Bitmap) {
         if (skipFrame()) return
-        process(frame, SystemClock.elapsedRealtime())
+        safely { process(frame, SystemClock.elapsedRealtime()) }
     }
 
     private fun setZoom(z: Float) { wide?.setZoom(z) ?: camera?.cameraControl?.setZoomRatio(z) }
@@ -476,11 +472,22 @@ class MainActivity : ComponentActivity() {
         if (!gemma.ready) { Log.i(TAG, "gemma not ready: ${gemma.status}"); return false }
         feedback.say("Looking.")
         said = "Gemma is looking…"
-        gemma.ask(prompt, latestFrame) { reply ->
+        gemma.ask(prompt, gemmaImage()) { reply ->
             val safe = reply?.takeIf { !SafetyGate.greenLight(it) } ?: fallback
             runOnUiThread { feedback.answer(safe); said = "Gemma: $safe" }
         }
         return true
+    }
+
+    /**
+     * The sharpest picture we have without touching the camera: the full-resolution preview
+     * (TextureView, ~1440x1920) instead of the 640x480 analysis frame. Falls back to the frame.
+     */
+    private fun gemmaImage(): Bitmap? {
+        val tv = preview as? android.view.TextureView
+        if (tv != null && tv.isAvailable && android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+            runCatching { tv.bitmap }.getOrNull()?.let { return it }
+        return latestFrame
     }
 
     /** What the sighted view shows: what the user heard, or felt when it was vibration only. */
@@ -530,7 +537,13 @@ class MainActivity : ComponentActivity() {
             if (rot == 0) bmp
             else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
         }
-        process(frame, t0)
+        safely { process(frame, t0) }
+    }
+
+    /** A crash in one frame must not silently stop safety: say so on screen and keep going. */
+    private fun safely(run: () -> Unit) = try { run() } catch (e: Exception) {
+        Log.e(TAG, "frame failed", e)
+        screen.analysisError(e.javaClass.simpleName)
     }
 
     private fun process(frame: Bitmap, t0: Long) {
@@ -540,8 +553,7 @@ class MainActivity : ComponentActivity() {
             speech?.let { feedback.say(it, strong = done); said = it }
             if (done) reading = false
             Log.d(TAG, "READ ocr ${SystemClock.elapsedRealtime() - t1}ms  ${speech.orEmpty()}")
-            val st = HudState(mode = "READ", said = said, imgW = frame.width, imgH = frame.height)
-            hud.post { hud.show(st); hud.contentDescription = said }
+            screen.post(HudState(mode = "READ", said = said, imgW = frame.width, imgH = frame.height, loading = false))
             return
         }
         latestFrame = frame
@@ -567,7 +579,19 @@ class MainActivity : ComponentActivity() {
             val walking = activity.current == Activity.WALKING
             hazards = withoutFurnitureFloor(depthAnalyzer.analyze(depth.run(frame), pitch, walking, t2, motion.speed), tracks)
             depthMs = SystemClock.elapsedRealtime() - d0
+            depthReady = true
         }
+
+        // Drop-off: DropStateMachine is the authority; the old depth drop cue is replaced by its decision.
+        val depthIn = if (depthOn && depthReady) app.nadaka.drop.DepthInput(depth.rawDisparity, depth.rawSize,
+            depthAnalyzer.scale, depthAnalyzer.floorTrusted, SystemClock.elapsedRealtime() - depth.lastRunMs) else null
+        drop.evaluate(SystemClock.elapsedRealtime(), frame, depthIn, pitch, tracks, health)?.let { dropOut = it }
+        val dropNow = dropOut
+        val confirmed = dropNow?.state == app.nadaka.drop.DropState.CONFIRMED_DROP
+        val risingDrop = confirmed && dropNow?.transition?.to == app.nadaka.drop.DropState.CONFIRMED_DROP
+        hazards = hazards.copy(dropAtM = if (confirmed) dropNow!!.dropAheadM else null, dropIsStep = false)
+        val dropHaptic = dropNow?.haptic ?: app.nadaka.drop.DropHaptic.NONE
+        dropOut = dropNow?.copy(transition = null, haptic = app.nadaka.drop.DropHaptic.NONE) // each event once
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
         if (health == Health.DARK && !torchOn) { torchOn = true; setTorch(true) }
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; setTorch(false) }
@@ -579,10 +603,20 @@ class MainActivity : ComponentActivity() {
             f.update(t2, tracks)?.let { if (!voice.listening) { feedback.say(it); said = "Finding: $it" } }
             if (f.done) finder = null
         }
-        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() && !voice.listening && finder == null }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+        // Drop-off is always spoken: on confirmation, then again every hazardRepeatMs while it stays confirmed.
+        // Not gated on listening, finding or an answer in progress: this one interrupts everything.
+        if (confirmed && (risingDrop || t2 - dropSaidMs >= Settings.hazardRepeatMs)) {
+            dropSaidMs = t2
+            val m = dropNow!!.dropAheadM
+            val words = if (m.isNaN()) "Stop. Drop ahead." else "Stop. Drop ahead, ${metres(m)}."
+            feedback.warn(words); said = words; saidLevel = Buzz.WARN
+        }
+        policy.decide(tracks, health, t2, hazards.copy(dropAtM = null), activity.current).takeIf { it.isNotEmpty() && finder == null }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+
+        feedback.haptics.drop(dropHaptic) // after the alert batch so nothing overrides it; ignores sound settings
 
         // Parking-sensor ticks for the nearest thing in my path (tracks or an unnamed depth obstacle).
-        if (activity.current == Activity.WALKING && !policy.blind && !voice.listening) { // ticks only while walking
+        if (activity.current == Activity.WALKING && !policy.blind) { // ticks only while walking (also while the mic is open)
             val inPathM = tracks.filter { it.hits >= Settings.minHits && !it.metres.isNaN() && inPath(it) && (it.sure || it.metres < Settings.veryCloseM) }
                 .minOfOrNull { it.metres }
             feedback.haptics.proximity(listOfNotNull(inPathM, hazards.floorObstacleAtM).minOrNull() ?: Float.NaN)
@@ -599,9 +633,11 @@ class MainActivity : ComponentActivity() {
         val st = HudState(
             mode = activity.current.name, heat = heat.tier, lens = Settings.zoom, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
             level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
-            depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
+            depth = depthAnalyzer.latest(), drop = dropNow, imgW = frame.width, imgH = frame.height,
+            loading = false, sensorError = if (motionMissing) "No motion sensor." else null,
+            baroHPa = if (pressure == null) Float.NaN else drop.barometer.filteredPressure, atMs = t2,
         )
-        hud.post { hud.show(st); hud.contentDescription = said }
+        screen.post(st)
     }
 }
 
@@ -623,9 +659,9 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     init {
         tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
-            override fun onDone(id: String?) { if (id == ANSWER) answering = false }
-            @Deprecated("") override fun onError(id: String?) { if (id == ANSWER) answering = false }
-            override fun onStop(id: String?, interrupted: Boolean) { if (id == ANSWER) answering = false }
+            override fun onDone(id: String?) { if (id == ANSWER) answerEnded() }
+            @Deprecated("") override fun onError(id: String?) { if (id == ANSWER) answerEnded() }
+            override fun onStop(id: String?, interrupted: Boolean) { if (id == ANSWER) answerEnded() }
         })
     }
 
@@ -634,6 +670,14 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     }
 
     /** Speaks an answer to the user's question in full. Only danger (see [play]) may interrupt it. */
+    /** The mic is open (volume up pressed): nothing may be spoken, vibration still works. */
+    var listening: () -> Boolean = { false }
+
+    /** Quiet gap after an answer so it can sink in before routine speech resumes. */
+    @Volatile private var quietUntilMs = 0L
+    private fun answerEnded() { answering = false; quietUntilMs = SystemClock.elapsedRealtime() + Settings.answerGapMs }
+    private val inGap get() = SystemClock.elapsedRealtime() < quietUntilMs
+
     fun answer(text: String, strong: Boolean = false) {
         answering = true
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, ANSWER)
@@ -642,6 +686,12 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
 
     fun buzz() = vibrator.vibrate(side)
 
+    /** Danger that must be heard now: cuts off anything being said, including an answer. */
+    fun warn(text: String) { if (!Prefs.audioOn || listening()) return; answering = false; tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "warn") }
+
+    /** Settings > Test audio: always audible, whatever the Audio switch says. */
+    fun test() = tts.speak("Audio test. Stop. Drop ahead, 1 metre.", TextToSpeech.QUEUE_FLUSH, null, "test")
+
     /** Stop talking before listening: the recognizer must not hear us. */
     fun hush() { answering = false; tts.stop() }
 
@@ -649,6 +699,7 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     fun readyCue() = vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), intArrayOf(0, 255, 0, 255), -1))
 
     fun say(text: String, strong: Boolean = false) {
+        if (!Prefs.audioOn || listening() || inGap) { if (strong && Prefs.hapticOn) vibrator.vibrate(result); return }
         // Never cut off an answer: queue behind it.
         tts.speak(text, if (answering) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH, null, text)
         if (strong) vibrator.vibrate(result)
@@ -664,6 +715,13 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
 
     /** Haptics-first: the most urgent pattern, plus only the short words that must be heard. */
     fun play(alerts: List<Alert>) {
+        if (!Prefs.audioOn || listening()) { alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play); return }
+        if (inGap) { // after an answer: feel routine alerts, hear only danger
+            alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
+            val danger = alerts.filter { it.buzz == Buzz.WARN }.map { it.short ?: it.text }
+            if (danger.isNotEmpty()) tts.speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger")
+            return
+        }
         if (answering) {
             // The user is listening to an answer: feel routine alerts, hear only danger (it interrupts).
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
@@ -687,7 +745,7 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     /** Speech mode: full sentences, most urgent first; the strongest buzz of the batch. */
     private fun speakAll(alerts: List<Alert>) {
         alerts.forEachIndexed { i, a -> tts.speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
-        vibrator.vibrate(
+        if (Prefs.hapticOn) vibrator.vibrate(
             when (alerts.maxOf { it.buzz.ordinal }) {
                 Buzz.WARN.ordinal -> result
                 Buzz.APPROACH.ordinal -> approach

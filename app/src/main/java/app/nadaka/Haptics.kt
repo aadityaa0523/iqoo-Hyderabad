@@ -2,12 +2,14 @@ package app.nadaka
 
 import android.content.Context
 import android.os.SystemClock
+import android.os.VibrationAttributes
+import app.nadaka.drop.DropHaptic
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 
 /** The haptic vocabulary (docs/haptics.md). Meaning is carried by rhythm; intensity only adds urgency. */
-enum class Tacton { DROP, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
+enum class Tacton { DROP, DROP_POSSIBLE, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
 
 /** Parking-sensor mapping: pulse interval for an obstacle at [m] metres in my path, or null = no pulse. */
 fun pulseIntervalMs(m: Float): Long? = when {
@@ -57,17 +59,35 @@ class Haptics(ctx: Context) {
     private var quietUntilMs = 0L
 
     fun play(t: Tacton) {
+        if (!Prefs.hapticOn) return
         quietUntilMs = SystemClock.elapsedRealtime() + 1200 // don't blur a pattern with proximity ticks
         v.vibrate(effect(t))
+    }
+
+    /** Drop-off events from DropHapticController. Alarm usage: felt even when media/ring sound is off. */
+    fun drop(h: DropHaptic) {
+        if (!Prefs.hapticOn) return
+        val e = when (h) {
+            DropHaptic.NONE -> return
+            DropHaptic.POSSIBLE_PULSE -> effect(Tacton.DROP_POSSIBLE)
+            DropHaptic.CONFIRMED_ESCALATING -> effect(Tacton.DROP)
+            DropHaptic.CONFIRMED_MAX -> maxWave(0 to 0, 400 to 255, 150 to 0, 400 to 255, 150 to 0, 400 to 255, 150 to 0, 400 to 255)
+        }
+        quietUntilMs = SystemClock.elapsedRealtime() + 1200
+        v.vibrate(e, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
     }
 
     /** Call every frame with the nearest in-path distance (NaN = nothing). */
     fun proximity(m: Float) {
         val now = SystemClock.elapsedRealtime()
         val a = pulse.update(now, m) ?: return
+        if (!Prefs.hapticOn) return
         if (now < quietUntilMs) return
         v.vibrate(VibrationEffect.createOneShot(Settings.tickMs, amp(a)))
     }
+
+    /** Settings > Test haptic: the confirmed-drop pattern, whatever the Haptic switch says. */
+    fun test() = v.vibrate(effect(Tacton.DROP))
 
     private fun amp(a: Float) = (a * Settings.hapticGain * 255).toInt().coerceIn(1, 255)
 
@@ -76,8 +96,10 @@ class Haptics(ctx: Context) {
      * from clearly different rhythms: heavy-slow, rising, accelerating, soft.
      */
     private fun effect(t: Tacton): VibrationEffect = when (t) {
-        // STOP: three long, heavy, evenly spaced pulses. The one pattern that must never be missed.
-        Tacton.DROP -> wave(0 to 0, 350 to 255, 200 to 0, 350 to 255, 200 to 0, 350 to 255)
+        // STOP: three long pulses, each heavier than the last. The one pattern that must never be missed.
+        Tacton.DROP -> wave(0 to 0, 350 to 170, 200 to 0, 350 to 215, 200 to 0, 350 to 255)
+        // Edge ahead, not yet confirmed: one short soft pulse.
+        Tacton.DROP_POSSIBLE -> wave(0 to 0, 90 to 110)
         // HEAD: two swells that ramp up ("rising" = up high).
         Tacton.HEAD -> wave(0 to 0, 80 to 70, 80 to 150, 120 to 255, 250 to 0, 80 to 70, 80 to 150, 120 to 255)
         // APPROACH: four short taps getting faster ("coming at you").
@@ -89,6 +111,11 @@ class Haptics(ctx: Context) {
         Tacton.TICK -> VibrationEffect.createOneShot(Settings.tickMs, amp(0.85f))
     }
 
+    /** Full strength regardless of the gain setting (descending confirmed: nothing is louder). */
+    private fun maxWave(vararg steps: Pair<Int, Int>) = VibrationEffect.createWaveform(
+        LongArray(steps.size) { steps[it].first.toLong() }, IntArray(steps.size) { steps[it].second }, -1,
+    )
+
     private fun wave(vararg steps: Pair<Int, Int>) = VibrationEffect.createWaveform(
         LongArray(steps.size) { steps[it].first.toLong() },
         IntArray(steps.size) { i -> if (steps[i].second == 0) 0 else (steps[i].second * Settings.hapticGain).toInt().coerceIn(1, 255) },
@@ -99,7 +126,8 @@ class Haptics(ctx: Context) {
 /** "Teach me the vibrations": each pattern with its meaning, as (spoken, tacton) steps. */
 val LESSON = listOf(
     "Ticks mean something is in your path. Faster ticks, closer." to Tacton.TICK,
-    "Three heavy pulses: stop, drop-off." to Tacton.DROP,
+    "One soft pulse: an edge ahead. Slow down and check with your cane." to Tacton.DROP_POSSIBLE,
+    "Three pulses, each stronger: stop, drop-off." to Tacton.DROP,
     "Two rising swells: something at head height." to Tacton.HEAD,
     "Four quick taps, getting faster: something is coming at you." to Tacton.APPROACH,
     "Long, short, long: I hear a horn, siren or barking dog around you." to Tacton.SOUND,

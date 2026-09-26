@@ -28,6 +28,11 @@ class DepthModel(ctx: Context, only: Backend? = null) {
     private val output: ByteBuffer
     private val pixels: IntArray
     private val raw: FloatArray
+    /** Raw 518x518 relative disparity of the last run (before pooling), for drop-off edge sampling. Read-only use. */
+    val rawDisparity: FloatArray get() = raw
+    val rawSize: Int get() = size
+    var lastRunMs = 0L
+        private set
     private val rgbF: FloatArray
     private val delegate: AutoCloseable?
     var preMs = 0.0; var inferMs = 0.0; var postMs = 0.0
@@ -69,6 +74,7 @@ class DepthModel(ctx: Context, only: Backend? = null) {
         val t2 = System.nanoTime()
         output.rewind()
         output.asFloatBuffer().get(raw)
+        lastRunMs = android.os.SystemClock.elapsedRealtime()
         return Array(DEPTH_ROWS) { r ->
             FloatArray(DEPTH_COLS) { c ->
                 val y0 = r * size / DEPTH_ROWS; val y1 = (r + 1) * size / DEPTH_ROWS
@@ -100,6 +106,10 @@ class DepthAnalyzer {
     private val pending = ArrayList<Float>() // candidate floor scales before the ruler is trusted
     private var mismatch = 0 // flat floor frames that disagree with the trusted ruler
 
+    /** The ground under my feet matched the trusted ruler in the last analysed depth frame. */
+    var floorTrusted = false
+        private set
+
     /** New lens or camera height: learn the floor ruler again (takes Settings.scaleLockFrames frames). */
     fun relearn() { scale = Float.NaN; pending.clear(); dropHits = 0; overheadHits = 0; lastDropM = Float.NaN; mismatch = 0 }
     private var dropHits = 0
@@ -125,7 +135,8 @@ class DepthAnalyzer {
      */
     fun analyze(g: Array<FloatArray>, pitchDeg: Float, walking: Boolean = true, now: Long = 0L, speedMps: Float = 0f): Hazards {
         grid = g
-        if (!walking || pitchDeg !in Settings.hazardPitchMinDeg..Settings.hazardPitchMaxDeg) return Hazards()
+        floorTrusted = false
+        if (pitchDeg !in Settings.hazardPitchMinDeg..Settings.hazardPitchMaxDeg) return Hazards()
         val pitch = Math.toRadians(pitchDeg.toDouble()).toFloat()
         val band = (DEPTH_COLS * 35 / 100) until (DEPTH_COLS * 65 / 100) // walking corridor
         val rowMed = FloatArray(DEPTH_ROWS) { r -> median(band.map { g[r][it] }) }
@@ -136,6 +147,15 @@ class DepthAnalyzer {
             if (z.isNaN() || z !in Settings.floorCalMinM..Settings.floorCalMaxM || rowMed[r] <= 0f) null else rowMed[r] * z
         }
         var floorOk = false
+        if (!walking) {
+            // Standing still: check the floor against the trusted ruler (drop-off can still see an edge ahead),
+            // but never learn the ruler here: a table top in view would poison it.
+            if (!scale.isNaN() && samples.size >= 3) {
+                val near = median(samples.takeLast(3)) / scale
+                floorTrusted = near in (1 / Settings.scaleTolerance)..Settings.scaleTolerance
+            }
+            return Hazards()
+        }
         if (samples.size >= 3) {
             val m = median(samples)
             val flat = (samples.max() - samples.min()) / m < Settings.floorFlatness
@@ -157,6 +177,7 @@ class DepthAnalyzer {
                 if (mismatch >= Settings.scaleLockFrames * 4) relearn()
             }
         }
+        floorTrusted = !scale.isNaN() && floorOk
         if (scale.isNaN() || !floorOk) return Hazards() // honest: no trusted floor this frame, no depth claims
 
         // 2. Drop-off: several independent cues must agree (see dropCandidate).

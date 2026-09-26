@@ -56,6 +56,22 @@ fun clock(bearingRad: Float): String {
     return "${if (hour == 0) 12 else (12 + hour - 1) % 12 + 1} o'clock"
 }
 
+/**
+ * Safety priority of a class, used only to break conflicts: which of two labels on the same object to trust,
+ * and which of several objects to announce/show first. Higher = more dangerous to walk into.
+ * Vehicles > people > animals > street furniture > everything else.
+ */
+fun priorityOf(label: String): Float = when (label) {
+    "car", "bus", "truck", "motorcycle", "bicycle", "train" -> 1.8f
+    "person" -> 1.5f
+    "dog", "horse", "cow", "cat", "sheep", "elephant", "bear" -> 1.4f
+    "fire hydrant", "stop sign", "parking meter", "bench", "chair", "potted plant", "suitcase" -> 1.2f
+    else -> 1f
+}
+
+/** Lower = pick first: distance shortened by priority (a car at 4 m outranks a cup at 2 m). */
+fun urgency(t: Track): Float = (if (t.metres.isNaN()) 99f else t.metres) / priorityOf(t.label)
+
 /** Depth-model hazards for this frame (Depth.kt). Null = not present. */
 data class Hazards(
     val dropAtM: Float? = null,
@@ -131,9 +147,11 @@ class AlertPolicy {
         val closeRange = if (walking) Settings.closeM else if (sitting) Settings.veryCloseM else Settings.veryCloseM + 0.25f
 
         // Depth hazards: the things a cane can't find in time.
-        hz.dropAtM?.takeIf { walking || it < closeRange }?.let {
-            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += if (hz.dropIsStep) Alert(phrase("Step down ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Step down.")
-                    else Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN, Tacton.DROP, "Stop. Drop.") }
+        // Drop-off: DropStateMachine already decided (and passes it only on the CONFIRMED rising edge), so no
+        // walking gate here; its vibration is played by DropHapticController, never tied to speech.
+        hz.dropAtM?.let {
+            if (now - lastDropMs >= Settings.hazardRepeatMs) { lastDropMs = now; out += if (hz.dropIsStep) Alert(phrase("Step down ahead", metres(it)), Buzz.WARN, null, "Step down.")
+                    else Alert(phrase("Stop. Drop ahead", metres(it)), Buzz.WARN, null, "Stop. Drop.") }
         }
         hz.overheadAtM?.takeIf { walking || it < closeRange }?.let {
             if (now - lastOverheadMs >= Settings.hazardRepeatMs) {
@@ -143,7 +161,7 @@ class AlertPolicy {
         }
 
         // Approaching: my own walking already removed (ego-motion).
-        val coming = stable.filter { it.approaching }.minByOrNull { it.ttc }
+        val coming = stable.filter { it.approaching }.minByOrNull { it.ttc / priorityOf(it.label) }
         if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
             lastApproachMs = now
             out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH, Tacton.APPROACH)
@@ -155,7 +173,7 @@ class AlertPolicy {
             it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM) &&
                 // Unsure or half-visible objects only when practically touching: silence beats a wrong alert.
                 ((it.sure && !it.edge) || it.metres < Settings.veryCloseM)
-        }.minByOrNull { it.metres }
+        }.minByOrNull { urgency(it) }
         if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
             lastCloseMs = now
             spokenHeight[close.id] = close.box.height()
@@ -181,7 +199,7 @@ class AlertPolicy {
         known.filter {
             it.moving && it.sure && !it.edge && it.metres <= Settings.movingRangeM && !(crowd && it.label == "person") &&
                 now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
-        }.minByOrNull { it.metres }?.let {
+        }.minByOrNull { urgency(it) }?.let {
             movingSaidMs[it.id] = now; lastInfoMs = now
             val words = phrase("${name(it)} moving", metres(it.metres), clock(it.bearing))
             return listOf(Alert(words, Buzz.SIDE, short = words))
@@ -193,7 +211,7 @@ class AlertPolicy {
             it.sure && !it.moving && !it.edge && it.metres <= range && inPath(it, Settings.staticPathDeg) && !(crowd && it.label == "person") &&
                 spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth } &&
                 now - (staticSaidMs["${it.label}@${clock(it.bearing)}"] ?: -1_000_000L) >= Settings.staticRepeatMs
-        }.minByOrNull { it.metres } ?: return out
+        }.minByOrNull { urgency(it) } ?: return out
         spokenHeight[t.id] = t.box.height()
         staticSaidMs["${t.label}@${clock(t.bearing)}"] = now
         lastInfoMs = now

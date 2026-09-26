@@ -94,12 +94,16 @@ class Detector(ctx: Context, only: Backend? = null) {
         }
     }
 
-    /** Class-aware greedy NMS. ponytail: O(n^2), fine for the few hundred boxes above threshold. */
-    private fun nms(dets: List<Detection>, maxIou: Float = 0.45f, max: Int = 25): List<Detection> {
+    /**
+     * Class-aware greedy NMS, then one label per object: when two classes sit on nearly the same box
+     * (chair vs couch, person vs dog), keep the one with the higher score x safety priority.
+     * ponytail: O(n^2), fine for the few hundred boxes above threshold.
+     */
+    private fun nms(dets: List<Detection>, maxIou: Float = 0.45f, sameObjectIou: Float = 0.7f, max: Int = 25): List<Detection> {
         val kept = ArrayList<Detection>()
-        for (d in dets.sortedByDescending { it.score }) {
+        for (d in dets.sortedByDescending { it.score * priorityOf(it.label) }) {
             if (kept.size == max) break
-            if (kept.none { it.label == d.label && iou(it.box, d.box) > maxIou }) kept += d
+            if (kept.none { iou(it.box, d.box) > if (it.label == d.label) maxIou else sameObjectIou }) kept += d
         }
         return kept
     }

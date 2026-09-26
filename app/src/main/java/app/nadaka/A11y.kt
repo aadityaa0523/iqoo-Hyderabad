@@ -5,14 +5,7 @@ import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
-import android.graphics.drawable.GradientDrawable
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
 
 /**
  * Screen palettes for low-vision users. Every text/background pair is >= 7:1 contrast (WCAG AAA):
@@ -47,8 +40,14 @@ object Prefs {
     var camera = CameraView.NORMAL
     var announce = false // speak each button's name/state when pressed
     var wizardDone = false
+    var audioOn = true
+    var hapticOn = true
+    var simplified = false      // hide annotations and object list: safety state only
+    var depthHc = false         // depth map as brightness bands + contour lines
+    var reducedMotion = false
+    var heroMode = app.nadaka.ui.HeroMode.BLEND
 
-    val lowVision get() = palette.highContrast && textScale >= 1.5f
+    val lowVision get() = palette.highContrast && textScale >= 1.3f
 
     fun load(ctx: Context) {
         val p = ctx.getSharedPreferences("nadaka", Context.MODE_PRIVATE)
@@ -59,17 +58,26 @@ object Prefs {
         wizardDone = p.getBoolean("wizardDone", false)
         Settings.hapticsFirst = p.getBoolean("hapticsFirst", true)
         Settings.chatty = p.getBoolean("chatty", false)
+        audioOn = p.getBoolean("audioOn", true)
+        hapticOn = p.getBoolean("hapticOn", true)
+        simplified = p.getBoolean("simplified", false)
+        depthHc = p.getBoolean("depthHc", false)
+        val systemNoMotion = android.provider.Settings.Global.getFloat(ctx.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+        reducedMotion = p.getBoolean("reducedMotion", systemNoMotion)
+        heroMode = runCatching { app.nadaka.ui.HeroMode.valueOf(p.getString("heroMode", "BLEND")!!) }.getOrDefault(app.nadaka.ui.HeroMode.BLEND)
     }
 
     fun save(ctx: Context) = ctx.getSharedPreferences("nadaka", Context.MODE_PRIVATE).edit()
         .putString("palette", palette.name).putFloat("textScale", textScale).putString("camera", camera.name)
         .putBoolean("announce", announce).putBoolean("wizardDone", wizardDone)
-        .putBoolean("hapticsFirst", Settings.hapticsFirst).putBoolean("chatty", Settings.chatty).apply()
+        .putBoolean("hapticsFirst", Settings.hapticsFirst).putBoolean("chatty", Settings.chatty)
+        .putBoolean("audioOn", audioOn).putBoolean("hapticOn", hapticOn).putBoolean("simplified", simplified)
+        .putBoolean("depthHc", depthHc).putBoolean("reducedMotion", reducedMotion).putString("heroMode", heroMode.name).apply()
 
     /** One switch for the whole "Low Vision / Senior" profile. */
     fun applyLowVision(on: Boolean) {
-        if (on) { palette = Palette.YELLOW_ON_BLACK; textScale = 1.5f; camera = CameraView.HIGH_CONTRAST; announce = true }
-        else { palette = Palette.STANDARD; textScale = 1f; camera = CameraView.NORMAL; announce = false }
+        if (on) { palette = Palette.YELLOW_ON_BLACK; textScale = 1.3f; camera = CameraView.HIGH_CONTRAST; announce = true; depthHc = true }
+        else { palette = Palette.STANDARD; textScale = 1f; camera = CameraView.NORMAL; announce = false; depthHc = false }
     }
 
     /** What caregivers see in the header so they can verify the profile is active. */
@@ -96,82 +104,4 @@ fun applyCameraView(preview: View) {
     val paint = m?.let { Paint().apply { colorFilter = ColorMatrixColorFilter(it) } }
     if (preview is android.view.TextureView) preview.setLayerPaint(paint) // TextureView is always a hardware layer
     else preview.setLayerType(if (m == null) View.LAYER_TYPE_NONE else View.LAYER_TYPE_HARDWARE, paint)
-}
-
-/**
- * Large-button settings panel and first-run wizard, with live preview (the screen behind updates as you
- * choose). Real Android views, so TalkBack reads every button. Buttons optionally announce themselves.
- */
-class SettingsPanel(
-    private val ctx: Context,
-    private val say: (String) -> Unit,
-    private val onChange: () -> Unit,
-    private val onLesson: () -> Unit,
-) {
-    private val dp = ctx.resources.displayMetrics.density
-    private val list = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding((20 * dp).toInt(), (20 * dp).toInt(), (20 * dp).toInt(), (20 * dp).toInt()) }
-    val view = ScrollView(ctx).apply { addView(list); visibility = View.GONE; isFillViewport = false }
-    val open get() = view.visibility == View.VISIBLE
-    var onOpenChange: (Boolean) -> Unit = {}
-
-    fun show(wizard: Boolean = false) {
-        build(wizard)
-        view.visibility = View.VISIBLE
-        onOpenChange(true)
-        if (wizard) say("Welcome to Nadaka. Display setup is open. For big, high contrast text, tap Low vision preset. Otherwise tap Done, at the bottom. Voice and vibration work without the screen.")
-    }
-
-    fun hide() {
-        view.visibility = View.GONE
-        onOpenChange(false)
-        if (!Prefs.wizardDone) { Prefs.wizardDone = true; Prefs.save(ctx) }
-    }
-
-    private fun build(wizard: Boolean) {
-        val pal = Prefs.palette
-        val fg = if (pal.highContrast) pal.fg else Color.WHITE
-        val bg = if (pal.highContrast) pal.bg else 0xF2101820.toInt()
-        val accent = if (pal.highContrast) pal.fg else 0xFFFFB300.toInt()
-        view.setBackgroundColor(bg)
-        list.removeAllViews()
-        list.addView(TextView(ctx).apply {
-            text = if (wizard) "Welcome to Nadaka\nSet up the display" else "Settings"
-            setTextColor(fg); textSize(26f); setPadding(0, 0, 0, (12 * dp).toInt())
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-        })
-        fun item(label: String, action: () -> Unit) = list.addView(Button(ctx).apply {
-            text = label
-            isAllCaps = false
-            textSize(20f)
-            setTextColor(if (pal.highContrast) pal.bg else 0xFF101820.toInt())
-            background = GradientDrawable().apply { setColor(accent); cornerRadius = 18 * dp; setStroke((3 * dp).toInt(), fg) }
-            minHeight = (64 * dp * Prefs.textScale).toInt()
-            gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            setPadding((18 * dp).toInt(), 0, (18 * dp).toInt(), 0)
-            contentDescription = label
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = (12 * dp).toInt() }
-            setOnClickListener {
-                action()
-                Prefs.save(ctx)
-                onChange()
-                build(wizard) // re-render in the new palette/size: live preview
-                if (Prefs.announce) say(announceText())
-            }
-        })
-        item("Low vision / senior preset: ${if (Prefs.lowVision) "ON" else "OFF"}") { Prefs.applyLowVision(!Prefs.lowVision) }
-        item("Colours: ${pal.label}") { Prefs.palette = Palette.entries[(pal.ordinal + 1) % Palette.entries.size] }
-        item("Text size: ${Prefs.textScale}×") { Prefs.textScale = when (Prefs.textScale) { 1f -> 1.5f; 1.5f -> 2f; else -> 1f } }
-        item("Camera view: ${Prefs.camera.label}") { Prefs.camera = CameraView.entries[(Prefs.camera.ordinal + 1) % CameraView.entries.size] }
-        item("Announce buttons: ${if (Prefs.announce) "ON" else "OFF"}") { Prefs.announce = !Prefs.announce }
-        item("Alerts: ${if (Settings.hapticsFirst) "vibration first" else "speech"}") { Settings.hapticsFirst = !Settings.hapticsFirst }
-        item("Teach me the vibrations") { onLesson() }
-        item("Done") { hide() }
-    }
-
-    private fun announceText() = listOf(
-        if (Prefs.lowVision) "Low vision preset on" else "Low vision preset off",
-        Prefs.palette.label, "text ${Prefs.textScale} times", "camera ${Prefs.camera.label}",
-    ).joinToString(", ")
-
-    private fun TextView.textSize(sp: Float) = setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * Prefs.textScale)
 }

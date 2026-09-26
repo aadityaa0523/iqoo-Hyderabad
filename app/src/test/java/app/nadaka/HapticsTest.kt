@@ -50,7 +50,7 @@ class HapticsTest {
         }
         val alerts = AlertPolicy().decide(listOf(track), Health.OK, 0, Hazards(dropAtM = 1.5f))
         val drop = alerts.first()
-        assertEquals(Tacton.DROP, drop.tacton)
+        assertNull(drop.tacton) // DropHapticController vibrates, independent of speech
         assertEquals("Stop. Drop.", drop.short)
         val coming = alerts.first { it.tacton == Tacton.APPROACH }
         assertNull(coming.short) // felt, not heard

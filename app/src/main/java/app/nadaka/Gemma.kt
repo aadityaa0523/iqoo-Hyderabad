@@ -66,7 +66,7 @@ class Gemma(private val ctx: Context) {
             e.createConversation(
                 ConversationConfig(
                     systemInstruction = Contents.of(SYSTEM),
-                    samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.2, seed = 0),
+                    samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = 1.0), // Gemma's recommended settings
                 )
             ).use { c ->
                 val parts = ArrayList<Content>()
@@ -90,14 +90,15 @@ class Gemma(private val ctx: Context) {
     }
 
     companion object {
-        const val SYSTEM = "You are the eyes of a blind pedestrian, speaking through their phone. " +
-            "Describe only what you can see in the image. Answer in at most two short sentences, plain words, no lists. " +
-            "Give directions as clock positions (12 o'clock is straight ahead) and rough distances in metres. " +
+        // No metres: a photo can't be measured, and asking for numbers made the model invent them
+        // ("a person 16.5 metres ahead"). Distances come from the depth sensor, never from Gemma.
+        const val SYSTEM = "You help a blind person understand the photo from their phone camera. " +
+            "Describe only what is clearly visible. Answer in two or three short, plain sentences, no lists. " +
+            "Say where things are with left, ahead or right. Do not guess distances or numbers you cannot see. " +
             "Never say whether it is safe to walk, move, cross or go, and never say the path or way is clear."
 
-        fun describePrompt(facts: String) =
-            "What is in front of me? Mention the most important things for walking. " +
-                (if (facts.isNotBlank()) "My obstacle sensor also reports: $facts" else "")
+        @Suppress("UNUSED_PARAMETER")
+        fun describePrompt(facts: String) = "What is in front of me? Start with what matters most for walking." 
 
         const val READ_PROMPT = "Read the sign or text in this image word for word, then say in one short sentence what it means. " +
             "If it is in Hindi, Telugu or another language, read it and give the English meaning. " +
