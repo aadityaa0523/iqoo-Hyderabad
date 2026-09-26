@@ -21,10 +21,12 @@ class EgoMotion(ctx: Context) : SensorEventListener {
     private val sm = ctx.getSystemService(SensorManager::class.java)
     @Volatile private var yawRate = 0f
     @Volatile private var pitchRate = 0f
+    @Volatile var gravity = floatArrayOf(0f, 9.8f, 0f) // device axes; upright portrait = +y
     private val steps = ArrayDeque<Long>()
 
     fun start() {
         sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        sm.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
     }
 
@@ -37,6 +39,7 @@ class EgoMotion(ctx: Context) : SensorEventListener {
                 yawRate = 0.7f * yawRate + 0.3f * e.values[1]
                 pitchRate = 0.7f * pitchRate + 0.3f * e.values[0]
             }
+            Sensor.TYPE_GRAVITY -> gravity = e.values.copyOf()
             Sensor.TYPE_STEP_DETECTOR -> synchronized(steps) { steps.addLast(SystemClock.elapsedRealtime()) }
         }
     }

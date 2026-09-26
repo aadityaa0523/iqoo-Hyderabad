@@ -3,6 +3,11 @@ package app.nadaka
 import android.Manifest.permission.ACTIVITY_RECOGNITION
 import android.Manifest.permission.CAMERA
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.PowerManager
+import androidx.camera.core.Camera
 import android.content.pm.PackageManager.PERMISSION_GRANTED
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -34,7 +39,6 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.roundToInt
 
 const val TAG = "NADAKA"
 
@@ -63,6 +67,23 @@ object Settings {
     var approachMps = 0.5f // object's own speed toward me
     var approachTtcS = 4f
     var approachCooldownMs = 1500L
+
+    // Edge cases (Alerts.kt). Calibrate luma/blur thresholds on the real phone.
+    var minHits = 3 // frames an object must be seen before it is spoken
+    var speechGapMs = 1200L
+    var habituationGrowth = 1.3f // re-announce a known object only once it looks 30% bigger
+    var crowdCount = 4
+    var crowdRepeatMs = 10000L
+    var healthPersistMs = 1000L
+    var healthRepeatMs = 8000L
+    var blockedLuma = 20f
+    var darkLuma = 35f
+    var torchOffLuma = 170f // torch stays on until the scene is this bright (daylight)
+    var blurVar = 15f
+    var minPitchDeg = -25f // camera looking up
+    var maxPitchDeg = 45f  // camera looking at the floor
+    var maxRollDeg = 30f
+    var lowBatteryPct = 15
 }
 
 class MainActivity : ComponentActivity() {
@@ -75,6 +96,15 @@ class MainActivity : ComponentActivity() {
     private val tracker by lazy { Tracker(EgoModel.loadOrNull { assets.open("ego_model.json").bufferedReader().readText() }) }
     private lateinit var ego: EgoMotion
     private lateinit var egoLog: EgoLog // analysis thread only
+    private val policy = AlertPolicy() // analysis thread only
+    private var camera: Camera? = null
+    private var torchOn = false
+    private var frameCount = 0
+    @Volatile private var frameStride = 1 // raised when the phone gets hot
+    private var thermalSaid = false
+    private var batterySaid = false
+    private var lastBatteryCheckMs = 0L
+    private val tiny = IntArray(64 * 48)
     private var reading = false // analysis thread only
     private var lastFrameMs = 0L
 
@@ -102,6 +132,22 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onResume() { super.onResume(); ego.start() }
+
+    /** Sustained NPU mode keeps us cool; if the phone still heats up, analyse fewer frames and say so once. */
+    private val thermal = PowerManager.OnThermalStatusChangedListener { status ->
+        frameStride = when {
+            status >= PowerManager.THERMAL_STATUS_SEVERE -> 3
+            status >= PowerManager.THERMAL_STATUS_MODERATE -> 2
+            else -> 1
+        }
+        if (status >= PowerManager.THERMAL_STATUS_SEVERE && !thermalSaid) {
+            thermalSaid = true
+            feedback.say("Phone is hot. Slowing down, alerts may be late.", strong = true)
+        }
+    }
+
+    override fun onStart() { super.onStart(); getSystemService(PowerManager::class.java).addThermalStatusListener(mainExecutor, thermal) }
+    override fun onStop() { getSystemService(PowerManager::class.java).removeThermalStatusListener(thermal); super.onStop() }
     override fun onPause() { ego.stop(); super.onPause() }
 
     private fun startCamera() {
@@ -128,7 +174,7 @@ class MainActivity : ComponentActivity() {
                 .also { it.setAnalyzer(analysisThread, ::analyze) }
             future.get().run {
                 unbindAll()
-                bindToLifecycle(this@MainActivity, CameraSelector.DEFAULT_BACK_CAMERA, previewUse, analysis)
+                camera = bindToLifecycle(this@MainActivity, CameraSelector.DEFAULT_BACK_CAMERA, previewUse, analysis)
             }
         }, mainExecutor)
     }
@@ -150,7 +196,16 @@ class MainActivity : ComponentActivity() {
         return true
     }
 
+    private fun checkBattery(now: Long) {
+        if (batterySaid || now - lastBatteryCheckMs < 60_000) return
+        lastBatteryCheckMs = now
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+        val pct = b.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+        if (pct <= Settings.lowBatteryPct) { batterySaid = true; feedback.say("Battery $pct percent. Charge soon.", strong = true) }
+    }
+
     private fun analyze(image: ImageProxy) {
+        if (frameCount++ % frameStride != 0 && !reading) { image.close(); return }
         val t0 = SystemClock.elapsedRealtime()
         val frame = image.use {
             val bmp = it.toBitmap()
@@ -173,27 +228,35 @@ class MainActivity : ComponentActivity() {
         val motion = ego.snapshot()
         val tracks = tracker.update(dets, t2, motion)
         if (egoLog.recording) tracks.forEach { egoLog.row(t2, it) }
-        feedback.onTracks(tracks)
+
+        // Edge cases: is the image usable? Dark -> torch, then honesty.
+        Bitmap.createScaledBitmap(frame, 64, 48, false).getPixels(tiny, 0, 64, 0, 0, 64, 48)
+        val (luma, sharp) = frameStats(tiny, 64, 48)
+        val (pitch, roll) = ego.gravity.let { tiltDegrees(it[0], it[1], it[2]) }
+        val health = assess(luma, sharp, pitch, roll)
+        if (health == Health.DARK && !torchOn) { torchOn = true; camera?.cameraControl?.enableTorch(true) }
+        else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
+        policy.decide(tracks, health, t2)?.let { feedback.play(it) }
+        checkBattery(t2)
 
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
         lastFrameMs = t2
         val rec = if (egoLog.recording) "  REC${if (egoLog.label == 1) "+" else ""}" else ""
-        val status = "${detector.backend} $fps fps det ${t2 - t1}ms  walk %.1fm/s yaw %.1f$rec".format(motion.speed, motion.yawRate)
+        val warn = if (health != Health.OK) "  ${health.name}" else ""
+        val status = "${detector.backend} $fps fps det ${t2 - t1}ms  walk %.1fm/s$warn$rec".format(motion.speed)
         Log.d(TAG, "$status  ${tracks.joinToString { "${it.label}#${it.id}${if (it.approaching) "!" else ""}" }}")
         hud.post { hud.show(tracks, status, frame.width, frame.height) }
     }
 }
 
-/** Approaching objects (ego-motion removed) first, else the nearest object. Clock-face directions. */
+/** Speech + vibration output. What to say is decided by AlertPolicy. */
 class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     private val tts = TextToSpeech(ctx, this)
     private val vibrator = ctx.getSystemService(VibratorManager::class.java).defaultVibrator
-    private val lastSaid = HashMap<String, Long>()
     private val side = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
     private val ahead = VibrationEffect.createWaveform(longArrayOf(0, 80, 80, 80), -1)
     private val result = VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
     private val approach = VibrationEffect.createWaveform(longArrayOf(0, 60, 40, 60, 40, 60, 40, 200), -1)
-    private var lastApproachMs = 0L
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) tts.language = Locale.ENGLISH
@@ -204,33 +267,16 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
         if (strong) vibrator.vibrate(result)
     }
 
-    fun onTracks(tracks: List<Track>) {
-        val now = SystemClock.elapsedRealtime()
-        val urgent = tracks.filter { it.approaching }.minByOrNull { it.ttc }
-        if (urgent != null) {
-            if (now - lastApproachMs < Settings.approachCooldownMs) return
-            lastApproachMs = now
-            tts.speak("${urgent.label} approaching, ${clock(urgent)}", TextToSpeech.QUEUE_FLUSH, null, "approach")
-            vibrator.vibrate(approach)
-            return
-        }
-        val t = tracks.maxByOrNull { it.box.height() } ?: return // nearest-looking
-        if (now - (lastSaid[t.label] ?: 0L) < Settings.speechCooldownMs) return
-        lastSaid[t.label] = now
-        val c = clock(t)
-        tts.speak("${t.label}, $c", TextToSpeech.QUEUE_FLUSH, null, t.label)
-        vibrator.vibrate(if (c == CLOCK_AHEAD) ahead else side)
-    }
-
-    /** Orientation-and-mobility style direction: 12 = straight ahead. */
-    private fun clock(t: Track): String {
-        val hour = (Math.toDegrees(t.bearing.toDouble()) / 30).roundToInt()
-        return "${if (hour == 0) 12 else (12 + hour - 1) % 12 + 1}$OCLOCK"
-    }
-
-    private companion object {
-        const val OCLOCK = " o'clock"
-        const val CLOCK_AHEAD = "12 o'clock"
+    fun play(a: Alert) {
+        tts.speak(a.text, TextToSpeech.QUEUE_FLUSH, null, a.text)
+        vibrator.vibrate(
+            when (a.buzz) {
+                Buzz.SIDE -> side
+                Buzz.AHEAD -> ahead
+                Buzz.APPROACH -> approach
+                Buzz.WARN -> result
+            }
+        )
     }
 }
 

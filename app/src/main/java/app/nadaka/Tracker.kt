@@ -44,6 +44,7 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
     var closing = 0f           // m/s, how fast the gap shrinks
     var objSpeed = 0f          // m/s toward me after subtracting my own walking
     var approaching = false
+    var hits = 0               // frames this object has been matched; flicker guard
     var features = FloatArray(0)
 
     val bearing get() = (box.centerX() - 0.5f) * Settings.hfovRad
@@ -77,6 +78,7 @@ class Tracker(private val model: EgoModel? = null) {
             val t = match?.also { free.remove(it) } ?: Track(nextId++, d.label, d.box, now)
             t.box = d.box
             t.seenMs = now
+            t.hits++
             measure(t, now, ego)
             seen += t
         }
