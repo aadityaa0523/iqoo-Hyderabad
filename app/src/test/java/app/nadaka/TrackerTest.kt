@@ -36,6 +36,13 @@ class TrackerTest {
         assertEquals(0f, t.objSpeed, 0.2f) // growth fully explained by my own walking
     }
 
+    @Test fun furnitureNeverApproachesEvenIfItLooms() {
+        // Phone carried toward a table without steps detected (e.g. in the hand): it looms, but tables don't walk.
+        val t = run("dining table", 0.75f, 3f, 1.2f, Ego(speed = 0f, yawRate = 0f, pitchRate = 0f))
+        assertFalse(t.approaching)
+        assertFalse(t.moving)
+    }
+
     @Test fun turningKeepsTheSameTrackThanksToGyroCompensation() {
         val tr = Tracker()
         val yaw = 1.5f // rad/s, a quick body turn

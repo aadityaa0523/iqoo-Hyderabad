@@ -36,6 +36,13 @@ private val HEIGHTS = mapOf(
     "backpack" to 0.5f, "bottle" to 0.25f, "tv" to 0.5f, "laptop" to 0.25f, "refrigerator" to 1.7f,
 )
 
+/** Things that cannot move by themselves: if they loom, it is because I moved (or the label is wrong). */
+val FIXED = setOf(
+    "bed", "dining table", "couch", "chair", "bench", "potted plant", "tv", "refrigerator", "toilet", "sink",
+    "oven", "microwave", "fire hydrant", "stop sign", "parking meter", "traffic light", "clock", "vase",
+    "book", "laptop", "keyboard", "mouse", "remote", "bottle", "cup", "suitcase",
+)
+
 class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
     val heights = ArrayDeque<Pair<Long, Float>>()
     var growth = 0f            // 1/s, relative image growth ("looming")
@@ -50,7 +57,7 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
     var hits = 0               // frames this object has been matched; flicker guard
     var score = 0f             // smoothed detector confidence
     var lateralMps = 0f        // sideways speed after removing my own turning
-    val moving get() = objSpeed > Settings.movingMps || kotlin.math.abs(lateralMps) > Settings.movingMps
+    val moving get() = label !in FIXED && (objSpeed > Settings.movingMps || kotlin.math.abs(lateralMps) > Settings.movingMps)
 
     /** Half-visible at the left/right edge: direction and size are unreliable. */
     val edge get() = box.left <= 0.02f || box.right >= 0.98f
@@ -131,8 +138,8 @@ class Tracker(private val model: EgoModel? = null) {
             t.growth, t.closing, ego.speed, abs(ego.yawRate), abs(ego.pitchRate), b.height(),
             abs(b.centerX() - 0.5f), t.objSpeed, min(t.ttc, 10f),
         )
-        t.approaching = model?.approaching(t.features)
-            ?: (t.objSpeed > Settings.approachMps && t.ttc < Settings.approachTtcS)
+        t.approaching = t.label !in FIXED && (model?.approaching(t.features)
+            ?: (t.objSpeed > Settings.approachMps && t.ttc < Settings.approachTtcS))
     }
 }
 
