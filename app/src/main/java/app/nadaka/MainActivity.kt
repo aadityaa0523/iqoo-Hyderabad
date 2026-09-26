@@ -2,6 +2,7 @@ package app.nadaka
 
 import android.Manifest.permission.ACTIVITY_RECOGNITION
 import android.Manifest.permission.CAMERA
+import android.Manifest.permission.RECORD_AUDIO
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -90,6 +91,9 @@ object Settings {
     var heatWarmupFrames = 240 // NPU warm-up: ignore our own speed until then
     var heatCalmMs = 20000L // calm needed before stepping down a tier
 
+    // Voice questions (Voice.kt)
+    var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
+
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
     var chatty = false
     var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
@@ -142,6 +146,10 @@ class MainActivity : ComponentActivity() {
     private var depthFrames = 0
     private var said = "" // last sentence spoken, shown as the caption
     private val activity = ActivityDetector() // analysis thread only
+    private val memory = HazardMemory()
+    @Volatile private var latestTracks = emptyList<Track>()
+    @Volatile private var latestHazards = Hazards()
+    private lateinit var voice: VoiceInput
     private var camera: Camera? = null
     private var torchOn = false
     private var frameCount = 0
@@ -176,7 +184,8 @@ class MainActivity : ComponentActivity() {
 
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
         else registerForActivityResult(RequestMultiplePermissions()) { if (it[CAMERA] == true) startCamera() }
-            .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION))
+            .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
+        voice = VoiceInput(this, ::answer) { feedback.say("Sorry, I didn't catch that.") }
     }
 
     override fun onResume() { super.onResume(); ego.start() }
@@ -214,12 +223,12 @@ class MainActivity : ComponentActivity() {
 
     // ponytail: volume-down starts READ; hold-to-switch and voice commands come in M5.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) { // label toggle while recording
-            analysisThread.execute {
-                if (!egoLog.recording) return@execute
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (egoLog.recording) analysisThread.execute { // label toggle while recording training data
                 egoLog.label = 1 - egoLog.label
                 feedback.say(if (egoLog.label == 1) "Approaching." else "Clear.")
-            }
+            } else if (voice.available) { feedback.buzz(); voice.listen() } // ask a question
+            else feedback.say("Voice questions are not available on this phone.")
             return true
         }
         if (keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return super.onKeyDown(keyCode, event)
@@ -236,6 +245,21 @@ class MainActivity : ComponentActivity() {
         headroom = getSystemService(PowerManager::class.java).getThermalHeadroom(10)
         val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         batteryC = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000)?.takeIf { it > -1000 }?.div(10f) ?: Float.NaN
+    }
+
+    /** Voice question -> deterministic answer. Safety questions never reach anything that could say yes. */
+    private fun answer(text: String) {
+        Log.i(TAG, "asked: $text")
+        val reply = when (intentOf(text)) {
+            Ask.SAFETY -> Answers.safety(memory.recent())
+            Ask.DESCRIBE -> Answers.describe(latestTracks, latestHazards)
+            Ask.READ -> { analysisThread.execute { if (!reading) { reader.start(); reading = true } }; "Reading. Hold it in front of the camera." }
+            Ask.CHATTY -> { Settings.chatty = true; "OK, I'll tell you more." }
+            Ask.QUIET -> { Settings.chatty = false; "OK, only important things." }
+            Ask.HELP -> HELP_TEXT
+        }
+        feedback.say(reply, strong = intentOf(text) == Ask.SAFETY)
+        said = reply
     }
 
     private fun checkBattery(now: Long) {
@@ -291,6 +315,9 @@ class MainActivity : ComponentActivity() {
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box) }
         if (health == Health.DARK && !torchOn) { torchOn = true; camera?.cameraControl?.enableTorch(true) }
         else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; camera?.cameraControl?.enableTorch(false) }
+        memory.record(t2, hazards, tracks, health)
+        latestTracks = tracks
+        latestHazards = hazards
         policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
         checkBattery(t2)
         pollHeat(t2)
@@ -322,6 +349,8 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) tts.language = Locale.ENGLISH
     }
+
+    fun buzz() = vibrator.vibrate(side)
 
     fun say(text: String, strong: Boolean = false) {
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, text)

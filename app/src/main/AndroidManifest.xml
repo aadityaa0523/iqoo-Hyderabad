@@ -4,6 +4,8 @@
     <uses-feature android:name="android.hardware.camera" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- On-device speech recognition for voice questions. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Step detector for ego speed. -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
