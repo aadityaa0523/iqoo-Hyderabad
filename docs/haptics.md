@@ -14,7 +14,7 @@ routine information into vibration, keeping speech for the few moments that need
 | van Erp, *Guidelines for the use of vibro-tactile displays in HCI* (Eurohaptics 2002) | Users reliably tell apart only ~3 intensity levels; timing differences are easier than intensity differences | Meaning is carried by rhythm; intensity only reinforces urgency |
 | Cassinelli, Reynolds & Ishikawa, *Augmenting spatial awareness with Haptic Radar* (ISWC 2006) | Mapping proximity to vibration lets people avoid unseen obstacles without training | Continuous proximity pulse for the nearest thing in the walking path |
 | Car parking sensors; commercial blind aids (WeWALK smart cane, Sunu band) | "Faster = closer" is understood instantly, with no learning | Pulse rate rises as the obstacle gets closer, continuous buzz when about to touch |
-| Android haptics guidance (VibrationEffect.Composition primitives) | Short crisp primitives feel clear; long buzzy vibrations feel like notifications and annoy | Built from CLICK / THUD / TICK / QUICK_RISE primitives on this phone's linear motor, with waveform fallback |
+| Android haptics guidance (VibrationEffect.Composition primitives) | Short crisp primitives feel clear; long buzzy vibrations feel like notifications and annoy | v1 used the motor's 20 ms primitives; on the chest they were too faint, so v2 uses 60-350 ms amplitude waveforms |
 
 Hardware on the iQOO loaner (checked with `dumpsys vibrator_manager`): one linear resonant
 actuator (150 Hz), amplitude control, all composition primitives supported. One actuator
