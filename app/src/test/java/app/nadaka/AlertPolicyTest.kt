@@ -15,9 +15,9 @@ class AlertPolicyTest {
     private fun AlertPolicy.say(tracks: List<Track>, now: Long, health: Health = Health.OK, hz: Hazards = Hazards()) =
         decide(tracks, health, now, hz).map { it.text }
 
-    @Test fun shakyObjectIsSaidAsMaybe() {
-        val t = track(1, metres = 1.2f).also { it.score = 0.3f }
-        assertEquals(listOf("maybe chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(t), 0))
+    @Test fun shakyObjectIsSilentUnlessTouching() {
+        assertEquals(0, AlertPolicy().say(listOf(track(1, metres = 1.2f).also { it.score = 0.3f }), 0).size)
+        assertEquals(listOf("chair, very close, 12 o'clock."), AlertPolicy().say(listOf(track(2, metres = 0.5f).also { it.score = 0.3f }), 0))
     }
 
     @Test fun halfVisibleEdgeObjectOnlyWhenTouching() {
@@ -79,7 +79,7 @@ class AlertPolicyTest {
         val p = AlertPolicy()
         assertEquals(1, p.say(listOf(track(1, h = 0.3f)), 0).size)
         assertEquals(0, p.say(listOf(track(1, h = 0.32f)), 10_000).size)
-        assertEquals(1, p.say(listOf(track(1, h = 0.45f)), 20_000).size)
+        assertEquals(1, p.say(listOf(track(1, h = 0.5f)), 20_000).size)
     }
 
     @Test fun closeAndApproachingAreBothAnnounced() {

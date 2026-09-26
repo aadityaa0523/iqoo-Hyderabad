@@ -45,7 +45,7 @@ const val TAG = "NADAKA"
 
 /** Every tunable lives here; the caregiver screen will edit these. */
 object Settings {
-    var minScore = 0.4f
+    var minScore = 0.5f
     var speechCooldownMs = 2000L
     var readTimeoutMs = 12000L
     var minTextArea = 0.04f // text must cover this fraction of the frame, else "Move closer"
@@ -65,14 +65,14 @@ object Settings {
     var trackKeepMs = 500L
     var growthWindowMs = 1000L
     var minGrowthSpanS = 0.25f
-    var approachMps = 0.5f // object's own speed toward me
-    var approachTtcS = 4f
-    var approachCooldownMs = 1500L
+    var approachMps = 0.7f // object's own speed toward me
+    var approachTtcS = 3f
+    var approachCooldownMs = 2500L
 
     // Edge cases (Alerts.kt). Calibrate luma/blur thresholds on the real phone.
-    var minHits = 3 // frames an object must be seen before it is spoken
-    var speechGapMs = 1200L
-    var habituationGrowth = 1.3f // re-announce a known object only once it looks 30% bigger
+    var minHits = 5 // frames an object must be seen before it is spoken
+    var speechGapMs = 2500L
+    var habituationGrowth = 1.5f // re-announce a known object only once it looks 50% bigger
     var crowdCount = 4
     var crowdRepeatMs = 10000L
     var healthPersistMs = 1000L
@@ -92,19 +92,20 @@ object Settings {
     var heatCalmMs = 20000L // calm needed before stepping down a tier
 
     // Voice questions (Voice.kt)
-    var hazardMemoryMs = 1500L
+    var hazardMemoryMs = 1500L // a hazard seen this recently is still reported when asked "is it safe?"
 
-    // Confidence (Tracker.kt): what makes an object SURE rather than "maybe".
+    // Confidence (Tracker.kt): unsure objects are not announced unless approaching or touching.
     var sureHits = 5
     var sureScore = 0.5f
     var agreeRatio = 1.6f // depth vs size distance may differ by up to 60%
-    var movingMps = 0.4f // a hazard seen this recently is still reported when asked "is it safe?"
+    var movingMps = 0.6f // below this, box jitter, not motion
 
     // Quiet by default: only safety-relevant speech (Alerts.kt). chatty = also announce far/new objects.
     var chatty = false // true = static objects at any distance, not just within staticRangeM
     var staticRangeM = 5f  // announce static objects within this range (once each)
+    var staticPathDeg = 30f // ...and roughly ahead: things far to the side don't block the way
     var movingRangeM = 10f // announce moving objects within this range
-    var movingRepeatMs = 8000L
+    var movingRepeatMs = 12000L
     var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
 
     // Activity modes (Activity.kt). vehicleVibration is a calibration knob: check it on a real bus.
@@ -115,9 +116,9 @@ object Settings {
     // Speech (Alerts.kt)
     var maxAlerts = 2 // e.g. "person approaching" AND "chair close" in the same breath
     var closeM = 1.5f
-    var closeRepeatMs = 2500L
+    var closeRepeatMs = 4000L
     var veryCloseM = 0.75f
-    var hazardRepeatMs = 2500L
+    var hazardRepeatMs = 3500L
 
     // Depth (Depth.kt). cameraHeightM is THE calibration knob: measure lens height on the wearer.
     var depthEvery = 2 // run the depth model every Nth analysed frame
@@ -130,7 +131,7 @@ object Settings {
     var dropRatio = 0.3f // floor >30% farther than a flat floor would be = it drops away
     var obstacleRatio = 0.25f
     var hazardRows = 2
-    var depthHits = 2 // depth frames in a row before a drop/overhang is announced
+    var depthHits = 3 // depth frames in a row before a drop/overhang is announced
     var headMinM = 1.2f
     var headMaxM = 2.1f
     var overheadMaxM = 2.0f
@@ -154,6 +155,7 @@ class MainActivity : ComponentActivity() {
     private var depthMs = 0L
     private var depthFrames = 0
     private var said = "" // last sentence spoken, shown as the caption
+    private var saidLevel: Buzz? = null
     private val activity = ActivityDetector() // analysis thread only
     private val memory = HazardMemory()
     @Volatile private var latestTracks = emptyList<Track>()
@@ -327,7 +329,7 @@ class MainActivity : ComponentActivity() {
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
         latestHazards = hazards
-        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text } }
+        policy.decide(tracks, health, t2, hazards, activity.current).takeIf { it.isNotEmpty() }?.let { feedback.play(it); said = it.joinToString(" ") { a -> a.text }; saidLevel = it.maxOf { a -> a.buzz } }
         checkBattery(t2)
         pollHeat(t2)
         heat.update(t2, getSystemService(PowerManager::class.java).currentThermalStatus, headroom, batteryC,
@@ -339,7 +341,7 @@ class MainActivity : ComponentActivity() {
         Log.d(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}")
         val st = HudState(
             mode = activity.current.name, heat = heat.tier, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
-            walkMps = motion.speed, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
+            level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), imgW = frame.width, imgH = frame.height,
         )
         hud.post { hud.show(st) }

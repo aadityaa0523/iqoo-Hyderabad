@@ -31,9 +31,12 @@ class DepthTest {
         return if (d < dropAt) d else ((h + extraDrop) / tan(a)).coerceAtMost(20f)
     }
 
-    /** Calibrate on a flat floor first (as when walking up to a hazard), then see the hazard on two depth frames. */
+    /** Calibrate on a flat floor first (as when walking up to a hazard), then see the hazard for depthHits frames. */
     private fun twice(s: Array<FloatArray>): Hazards = DepthAnalyzer().let {
-        it.analyze(scene { a -> floor(a) }, pitchDeg); it.analyze(s, pitchDeg); it.analyze(s, pitchDeg)
+        it.analyze(scene { a -> floor(a) }, pitchDeg)
+        var hz = Hazards()
+        repeat(Settings.depthHits) { _ -> hz = it.analyze(s, pitchDeg) }
+        hz
     }
 
     @Test fun flatFloorIsQuietAndRecoversScale() {

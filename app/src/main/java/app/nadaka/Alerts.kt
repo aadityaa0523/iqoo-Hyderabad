@@ -60,10 +60,9 @@ data class Hazards(
     val floorObstacleAtM: Float? = null,
 )
 
-/** "chair", or "maybe chair" when the evidence is shaky. */
-private fun name(t: Track) = if (t.sure) t.label else "maybe ${t.label}"
+private fun name(t: Track) = t.label
 
-private fun inPath(t: Track) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < Settings.pathHalfDeg
+private fun inPath(t: Track, halfDeg: Float = Settings.pathHalfDeg) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < halfDeg
 
 /** "2.5 metres", "1 metre", "very close"; "" when unknown. */
 fun metres(m: Float): String {
@@ -146,12 +145,14 @@ class AlertPolicy {
         // Only things in my path, or practically touching me. A chair 1 m to the side is not news.
         val close = stable.filter {
             it !== coming && it.metres < closeRange && (inPath(it) || it.metres < Settings.veryCloseM) &&
-                (!it.edge || it.metres < Settings.veryCloseM) // half-visible edge objects only when practically touching
+                // Unsure or half-visible objects only when practically touching: silence beats a wrong alert.
+                ((it.sure && !it.edge) || it.metres < Settings.veryCloseM)
         }.minByOrNull { it.metres }
         if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
             lastCloseMs = now
             spokenHeight[close.id] = close.box.height()
-            out += Alert(phrase("${name(close)} close", metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
+            val what = if (close.metres < Settings.veryCloseM) name(close) else "${name(close)} close"
+            out += Alert(phrase(what, metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
         } else if (close == null && coming == null && walking) {
             hz.floorObstacleAtM?.takeIf { it < Settings.closeM && now - lastCloseMs >= Settings.closeRepeatMs }?.let {
                 lastCloseMs = now
@@ -170,7 +171,7 @@ class AlertPolicy {
         }
 
         known.filter {
-            it.moving && !it.edge && it.metres <= Settings.movingRangeM && !(crowd && it.label == "person") &&
+            it.moving && it.sure && !it.edge && it.metres <= Settings.movingRangeM && !(crowd && it.label == "person") &&
                 now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
         }.minByOrNull { it.metres }?.let {
             movingSaidMs[it.id] = now; lastInfoMs = now
@@ -180,7 +181,7 @@ class AlertPolicy {
         if (!walking) return out // standing still: static things are not news
         val range = if (Settings.chatty) Float.MAX_VALUE else Settings.staticRangeM
         val t = known.filter {
-            it.sure && !it.moving && !it.edge && it.metres <= range && !(crowd && it.label == "person") &&
+            it.sure && !it.moving && !it.edge && it.metres <= range && inPath(it, Settings.staticPathDeg) && !(crowd && it.label == "person") &&
                 spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth }
         }.minByOrNull { it.metres } ?: return out // once per object; again only once it looms 30% bigger
         spokenHeight[t.id] = t.box.height()

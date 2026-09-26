@@ -25,7 +25,7 @@ class TrackerTest {
     }
 
     @Test fun personWalkingAtStandingUserIsApproaching() {
-        val t = run("person", 1.7f, 6f, 1.2f, Ego(speed = 0f, yawRate = 0f, pitchRate = 0f))
+        val t = run("person", 1.7f, 4f, 1.2f, Ego(speed = 0f, yawRate = 0f, pitchRate = 0f)) // ~2 s to contact
         assertTrue(t.approaching)
         assertEquals(1.2f, t.objSpeed, 0.2f)
     }

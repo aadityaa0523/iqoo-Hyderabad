@@ -60,7 +60,7 @@ class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
 
     /**
      * SURE: seen steadily, confident, fully in view, depth and size agree. UNSURE objects are only
-     * spoken when they matter (close or approaching) and then as "maybe ...".
+     * spoken when they matter (approaching, or practically touching).
      */
     val sure get() = hits >= Settings.sureHits && score >= Settings.sureScore && !edge && consistent
     var features = FloatArray(0)
@@ -123,7 +123,9 @@ class Tracker(private val model: EgoModel? = null) {
         t.growth = ln(b.height() / h0) / span
         t.ttc = if (t.growth > 0.01f) 1 / t.growth else Float.POSITIVE_INFINITY
         val clipped = b.top <= 0.01f || b.bottom >= 0.99f
-        t.closing = if (clipped) 0f else t.distance * t.growth // growth of a cut box is meaningless
+        // Distance change over the window (same class-height model at both ends): unbiased even when
+        // the object closes in fast, unlike current-distance x average growth. A cut box is meaningless.
+        t.closing = if (clipped) 0f else (HEIGHTS[t.label] ?: 1f) / Settings.vfovRad * (1 / h0 - 1 / b.height()) / span
         t.objSpeed = t.closing - ego.speed * cos(t.bearing) // my walking explains this much of the growth
         t.features = floatArrayOf(
             t.growth, t.closing, ego.speed, abs(ego.yawRate), abs(ego.pitchRate), b.height(),
