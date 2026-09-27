@@ -50,9 +50,8 @@ class AlertPolicyTest {
     @Test fun staticWithinFiveMetresOnce() {
         val p = AlertPolicy()
         assertEquals(emptyList<String>(), p.say(listOf(track(1, metres = 6f)), 0)) // beyond 5 m: silent
-        assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 4f)), 0)) // beyond 3 m: silent
-        assertEquals(listOf("Chair, 2.5 metres, 12 o'clock."), p.say(listOf(track(2, metres = 2.4f)), 0))
-        assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 2.3f)), 10_000)) // already told
+        assertEquals(listOf("Chair, 3 metres, 12 o'clock."), p.say(listOf(track(2, metres = 3.1f)), 0))
+        assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 3f)), 10_000)) // already told
         assertEquals(emptyList<String>(), p.say(listOf(track(3, cx = 0.95f, metres = 1.2f)), 20_000)) // half out of frame
         assertEquals(listOf("chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(track(4, metres = 1.2f)), 0))
     }
@@ -76,8 +75,8 @@ class AlertPolicyTest {
     }
 
     @Test fun staticAwarenessIsSpokenEvenInVibrationMode() {
-        val a = AlertPolicy().decide(listOf(track(1, metres = 2.4f)), Health.OK, 0).single()
-        assertEquals("Chair, 2.5 metres, 12 o'clock.", a.short) // spoken, not just felt
+        val a = AlertPolicy().decide(listOf(track(1, metres = 3.1f)), Health.OK, 0).single()
+        assertEquals("Chair, 3 metres, 12 o'clock.", a.short) // spoken, not just felt
     }
 
     @Test fun reTrackedObjectIsNotAnnouncedAgain() {
@@ -107,11 +106,11 @@ class AlertPolicyTest {
         assertEquals(1, p.say(listOf(track(1, h = 0.5f)), 20_000).size)
     }
 
-    @Test fun onlyOneObjectIsSpokenAtATime() {
+    @Test fun closeAndApproachingAreBothAnnounced() {
         val said = AlertPolicy().say(
             listOf(track(1, metres = 1.0f), track(2, "person", cx = 0.8f, approaching = true, metres = 4f)), 0,
         )
-        assertEquals(listOf("person approaching, 4 metres, 1 o'clock."), said) // one voice, not two
+        assertEquals(listOf("person approaching, 4 metres, 1 o'clock.", "chair close, 1 metre, 12 o'clock."), said)
     }
 
     @Test fun closeObjectKeepsRepeatingWhileClose() {
