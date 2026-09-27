@@ -70,8 +70,9 @@ class Haptics(ctx: Context) {
         val e = when (h) {
             DropHaptic.NONE -> return
             DropHaptic.POSSIBLE_PULSE -> effect(Tacton.DROP_POSSIBLE)
-            DropHaptic.CONFIRMED_ESCALATING -> effect(Tacton.DROP)
-            DropHaptic.CONFIRMED_MAX -> maxWave(0 to 0, 400 to 255, 150 to 0, 400 to 255, 150 to 0, 400 to 255, 150 to 0, 400 to 255)
+            // Confirmed drop: the stop rhythm, kept up for Settings.dropHapticMs (5 s) so it can't be missed.
+            DropHaptic.CONFIRMED_ESCALATING -> wave(*dropPulses(350, 150, listOf(170, 215)))
+            DropHaptic.CONFIRMED_MAX -> maxWave(*dropPulses(400, 100, emptyList()))
         }
         quietUntilMs = SystemClock.elapsedRealtime() + 1200
         v.vibrate(e, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
@@ -112,6 +113,17 @@ class Haptics(ctx: Context) {
         // CAN'T SEE: two gentle medium pulses, calm.
         Tacton.CANT_SEE -> wave(0 to 0, 180 to 120, 300 to 0, 180 to 120)
         Tacton.TICK -> VibrationEffect.createOneShot(Settings.tickMs, amp(0.85f))
+    }
+
+    /** On/off pulses filling [Settings.dropHapticMs]: the first ones at [rampUp] amplitudes, the rest at full. */
+    private fun dropPulses(onMs: Int, offMs: Int, rampUp: List<Int>): Array<Pair<Int, Int>> {
+        val steps = ArrayList<Pair<Int, Int>>().apply { add(0 to 0) }
+        var t = 0; var i = 0
+        while (t + onMs <= Settings.dropHapticMs) {
+            if (i > 0) { steps += offMs to 0; t += offMs }
+            steps += onMs to (rampUp.getOrNull(i) ?: 255); t += onMs; i++
+        }
+        return steps.toTypedArray()
     }
 
     /** Full strength regardless of the gain setting (descending confirmed: nothing is louder). */

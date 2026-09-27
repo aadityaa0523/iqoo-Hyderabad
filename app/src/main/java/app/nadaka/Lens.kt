@@ -46,3 +46,38 @@ class LensPolicy {
 /** Field of view after zoom: tan(half-angle) scales with 1/zoom (base = the 1x lens). */
 fun zoomedFov(baseDeg: Float, zoom: Float): Float =
     Math.toRadians(2 * Math.toDegrees(kotlin.math.atan(kotlin.math.tan(Math.toRadians(baseDeg / 2.0)) / zoom))).toFloat()
+
+/**
+ * Torch for dark scenes. The camera can't see the room's own light while the torch is on (it measures the torch),
+ * so every [Settings.torchProbeMs] the torch goes off for [Settings.torchSettleMs] to look: room lit -> stay off,
+ * still dark -> back on. Turns on only after [Settings.torchOnMs] of real darkness. Pure logic, unit-tested.
+ */
+class TorchPolicy {
+    var on = false          // the torch is wanted (it may be briefly off for a probe)
+        private set
+    private var darkSinceMs = -1L
+    private var lastProbeMs = 0L
+    private var probeStartMs = -1L
+
+    /** One analysed frame's mean brightness. Returns the torch state to set now, or null for no change. */
+    fun update(now: Long, luma: Float): Boolean? {
+        if (!on) {
+            if (luma >= Settings.darkLuma) { darkSinceMs = -1; return null }
+            if (darkSinceMs < 0) darkSinceMs = now
+            if (now - darkSinceMs < Settings.torchOnMs) return null
+            on = true; lastProbeMs = now; darkSinceMs = -1
+            return true
+        }
+        if (probeStartMs >= 0) { // torch off for a moment: is the room itself lit?
+            if (now - probeStartMs < Settings.torchSettleMs) return null // let the exposure settle
+            probeStartMs = -1; lastProbeMs = now
+            if (luma >= Settings.torchAmbientLuma) { on = false; return null } // already off: stay off
+            return true
+        }
+        if (now - lastProbeMs >= Settings.torchProbeMs) { probeStartMs = now; return false }
+        return null
+    }
+
+    /** App left the screen: the camera closes, so forget everything. */
+    fun reset() { on = false; darkSinceMs = -1; probeStartMs = -1 }
+}

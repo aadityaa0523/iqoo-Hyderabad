@@ -30,11 +30,26 @@
         <uses-native-library android:name="libvndksupport.so" android:required="false" />
 
         <!-- Benchmark: adb shell am start -n app.nadaka/.BenchActivity (no camera, nothing else competing for the NPU). -->
+        <!-- Quick launch: volume up x3 from anywhere opens Nadaka (QuickLaunch.kt). -->
+        <service
+            android:name=".QuickLaunchService"
+            android:exported="false"
+            android:label="@string/quick_launch_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/quick_launch" />
+        </service>
+
         <activity android:name=".BenchActivity" android:exported="true" android:screenOrientation="portrait" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

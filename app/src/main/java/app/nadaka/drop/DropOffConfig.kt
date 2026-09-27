@@ -41,11 +41,14 @@ object DropOffConfig {
     var STAIRS_SLOPE_MIN = 0.35f         // ~20 deg; ramps are gentler
     var STAIRS_SLOPE_MAX = 1.3f          // ~52 deg; walls are near vertical
     var STAIRS_CONFIRM = 3               // of the last 5 evaluations
+    var STAIR_STEP_MIN_M = 0.1f          // a level change this big counts as a step
+    var STAIR_STEP_MAX_M = 0.3f          // bigger than this is a drop (down) or several hidden steps (up)
+    var STAIR_RISE_TYPICAL_M = 0.17f     // one step's rise (to count a big jump as several)
     // Reflection guard (shiny floor / puddle mirroring the ceiling)
     var REFLECTION_DEEP_M = 1.2f         // a single edge "dropping" deeper than this is suspicious
     var REFLECTION_SIMILAR_LUMA = 20f    // near and far side look like the same floor
     var REFLECTION_HIGHLIGHT_LUMA = 200f // or the far side is a bright mirror image of lights / sky
-    var DEPTH_MAX_AGE_MS = 250L          // older depth frames are UNRELIABLE for this evaluation
+    var DEPTH_MAX_AGE_MS = 450L          // older depth is UNRELIABLE (standing: frames come every 200-330 ms)
 
     // Ground plane (3D fit in metres through the floor ruler).
     var GROUND_MIN_POINTS = 20

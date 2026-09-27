@@ -95,7 +95,7 @@ object Answers {
     }
 }
 
-enum class Ask { SAFETY, STRAIGHT, EMERGENCY, FIND, STOP, SIT, VEHICLE, WALK, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
+enum class Ask { SAFETY, STRAIGHT, PANEL, EMERGENCY, FIND, STOP, SIT, VEHICLE, WALK, DESCRIBE, SIGN, READ, CHATTY, QUIET, SPEECH, HAPTIC, LEARN, HELP }
 
 /** Deterministic intent grammar. Safety is checked FIRST and wins over everything. */
 /** Typical recognizer slips on short commands, normalised before matching. */
@@ -124,6 +124,7 @@ fun intentOf(text: String): Ask {
         Regex("""\b(i'?m|i am|we'?re)\s+(sitting|seated)|\bsitting down\b""").containsMatchIn(t) -> Ask.SIT
         Regex("""\b(i'?m|i am|we'?re)\s+(on|in)\s+(a |an |the )?(bus|car|auto|train|metro|cab|taxi|vehicle|rickshaw)""").containsMatchIn(t) -> Ask.VEHICLE
         Regex("""\b(let'?s go|lets go|i'?m walking|i am walking|start walking|walking mode)\b""").containsMatchIn(t) -> Ask.WALK
+        Regex("""\b(lift|elevator|which floor|what floor|floor buttons?|buttons|room (number|no)|door (number|no)|flat (number|no)|which room)\b""").containsMatchIn(t) -> Ask.PANEL
         Regex("""\b(sign|signs|board|written|writing|label|poster|menu|text|what does (it|that|this) say)\b""").containsMatchIn(t) -> Ask.SIGN
         Regex("""\b(read|money|note|notes|rupee|rupees|medicine|tablet|strip|currency|cash|padh|dawai|paisa)""").containsMatchIn(t) || "पढ़" in t || "చదువు" in t -> Ask.READ
         Regex("""\b(teach|learn|lesson)\b|\bvibrations?\b.*\bmean""").containsMatchIn(t) -> Ask.LEARN

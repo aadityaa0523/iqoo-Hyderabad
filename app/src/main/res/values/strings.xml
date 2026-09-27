@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quick_launch_label">Nadaka quick launch</string>
+    <string name="quick_launch_description">Press volume up three times quickly to open Nadaka from anywhere, even the lock screen. It only watches for that triple press; the volume still changes as normal and nothing on your screen is read.</string>
+</resources>

@@ -29,6 +29,8 @@ data class DropOutput(
     val pathReason: String,
     val timingsMs: FloatArray,          // edge, depth, ground, fusion, total
     val stairsUpM: Float = Float.NaN,   // confirmed stairs going up: distance to the first step
+    val stairsUpSteps: Int = 0,         // steps counted going up (0 = unknown)
+    val stairsDownSteps: Int = 0,       // at least this many steps down beyond the drop edge (0/1 = a single drop)
     val reflection: Boolean = false,    // the best candidate looked like a reflection and was capped
 )
 
@@ -43,6 +45,7 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
     private val stairsAnalyzer = StairsUpAnalyzer()
     private val stairsSeen = ArrayDeque<Boolean>()
     private var stairsM = Float.NaN
+    private var stairsUpN = 0
     val barometer = BarometerAnalyzer(hasBarometer)
     private val history = DropEvidenceHistory()
     private val machine = DropStateMachine()
@@ -104,7 +107,7 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
         // Stairs going up: needs 3 of the last 5 evaluations.
         val up = stairsAnalyzer.analyze(depth, geo)
         stairsSeen.addLast(!up.isNaN()); if (stairsSeen.size > 5) stairsSeen.removeFirst()
-        if (!up.isNaN()) stairsM = up
+        if (!up.isNaN()) { stairsM = up; stairsUpN = stairsAnalyzer.steps }
         val stairsUp = if (stairsSeen.count { it } >= C.STAIRS_CONFIRM) stairsM else Float.NaN
 
         val sensorBlocked = health == Health.BLOCKED
@@ -121,7 +124,9 @@ class DropPipeline(hasBarometer: Boolean, private val logFile: File? = null) {
             history.possibleCount(now), history.strongCount(now), machine.recoveryCount, history.classes(),
             barometer.status, pathReason,
             floatArrayOf((t1 - t0) / 1e6f, tDepth / 1e6f, tGround / 1e6f, tFuse / 1e6f, total),
-            stairsUp, bestMirrored,
+            stairsUp, if (stairsUp.isNaN()) 0 else stairsUpN,
+            if (machine.state == DropState.POSSIBLE_DROP || machine.state == DropState.CONFIRMED_DROP) stairsAnalyzer.stepsDown(depth, geo) else 0,
+            bestMirrored,
         )
         log(out)
         return out

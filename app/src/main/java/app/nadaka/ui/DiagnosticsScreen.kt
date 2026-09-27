@@ -21,6 +21,7 @@ class DiagnosticsScreen(private val act: Activity, private val screen: LiveScree
     private val title = TextView(act)
     private val close = Button(act)
     private val values = HashMap<String, TextView>()
+    private var depthView: HeroView? = null
     @Volatile private var delegation: List<String> = emptyList() // "317/317 (TfLiteQnnDelegate)" in model-open order
     val open get() = view.visibility == View.VISIBLE
 
@@ -57,6 +58,19 @@ class DiagnosticsScreen(private val act: Activity, private val screen: LiveScree
         list.removeAllViews(); values.clear()
         list.setPadding(t.ipx(20f), 0, t.ipx(20f), t.ipx(40f))
 
+        // Live depth map from Depth Anything V2 on the NPU, with what the app reads from it drawn on top.
+        section("Live depth  ·  near = bright")
+        depthView = HeroView(act).apply {
+            forceDepth = true
+            contentDescription = "Live depth map from the depth model. Near things are bright, far things are dark."
+            addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                val want = v.width * 4 / 3 // the camera frame is 3:4
+                if (want > 0 && v.height != want) v.post { v.layoutParams = v.layoutParams.apply { height = want } }
+            }
+        }
+        list.addView(depthView, LinearLayout.LayoutParams(-1, t.ipx(400f)).apply { topMargin = t.ipx(8f) })
+
+        section("AI engine · questions"); row("Answering now"); row("Why"); row("Last answer"); row("Network"); row("Always on the phone")
         section("YOLOX · objects"); row("Backend"); row("Latency"); row("Delegation"); row("Model")
         section("Depth Anything V2"); row("Depth backend"); row("Precision"); row("Depth latency"); row("Depth delegation")
         section("Pipeline"); row("Frame rate"); row("Lens"); row("Activity"); row("Thermal")
@@ -102,6 +116,14 @@ class DiagnosticsScreen(private val act: Activity, private val screen: LiveScree
 
     fun update(s: HudState) {
         if (!open) return
+        depthView?.show(s, safetyOf(s))
+        actions.route()?.let { a ->
+            set("Answering now", if (a.cloudNow) "Cloud · OpenRouter (${app.nadaka.Settings.cloudModels.first().substringBefore(':')})" else "On-device · NPU")
+            set("Why", a.why)
+            set("Last answer", if (a.last.atMs == 0L) "—" else "${a.last.engine} · ${a.last.ms} ms · ${a.last.reason}")
+            set("Network", a.network)
+        }
+        set("Always on the phone", "Object detection, depth, drop-offs, stairs, falls: real-time safety never waits for a network")
         set("Backend", backend(s.backend))
         set("Latency", if (s.backend.isEmpty()) "—" else "${s.detMs} ms")
         set("Delegation", delegation.getOrNull(0) ?: "Not in log")

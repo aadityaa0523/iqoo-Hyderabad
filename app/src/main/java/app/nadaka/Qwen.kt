@@ -123,7 +123,7 @@ class Qwen(private val ctx: Context) : Vlm {
             user.put(JSONObject().put("type", "text").put("text", prompt))
             val body = JSONObject()
                 .put("messages", JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", SYSTEM))
+                    .put(JSONObject().put("role", "system").put("content", (SYSTEM + " " + Prefs.speechLang.qwen).trim()))
                     .put(JSONObject().put("role", "user").put("content", user)))
                 // Qwen3-VL recommended sampling for instruct models.
                 .put("temperature", 0.7).put("top_p", 0.8).put("top_k", 20)

@@ -83,17 +83,20 @@ fun safetyOf(s: HudState): Safety {
     if (s.mode == "VEHICLE") return Safety(Level.INFO, Glyph.PAUSE, "PAUSED", null, "In a vehicle.", status = "PAUSED", statusOn = false)
 
     if (drop?.state == DropState.CONFIRMED_DROP)
-        return Safety(Level.DANGER, Glyph.STOP, "STOP", "DROP AHEAD", null, drop.dropAheadM, "AHEAD")
+        return if (drop.stairsDownSteps >= 2)
+            Safety(Level.DANGER, Glyph.STOP, "STOP", "STAIRS DOWN", "At least ${drop.stairsDownSteps} steps.", drop.dropAheadM, "AHEAD")
+        else Safety(Level.DANGER, Glyph.STOP, "STOP", "DROP AHEAD", null, drop.dropAheadM, "AHEAD")
     s.hazards.overheadAtM?.let {
         return Safety(Level.DANGER, Glyph.STOP, "STOP", "HEAD HEIGHT", "Something at head height.", it, directionOf(s.hazards.overheadBearing))
     }
     val coming = s.tracks.filter { it.approaching && it.hits >= Settings.minHits }.minByOrNull { app.nadaka.urgency(it) }
     if (coming != null && (coming.metres.isNaN() || coming.metres < Settings.closeM))
-        return Safety(Level.CAUTION, Glyph.WARN, "CAUTION", "${coming.label.uppercase()} COMING", null, coming.metres, directionOf(coming.bearing))
+        return Safety(Level.CAUTION, Glyph.WARN, "CAUTION", "${app.nadaka.displayName(coming.label).uppercase()} COMING", null, coming.metres, directionOf(coming.bearing))
     if (drop?.state == DropState.POSSIBLE_DROP)
         return Safety(Level.CAUTION, Glyph.WARN, "POSSIBLE DROP", null, "Step ahead. Check with your cane.", drop.dropAheadM, "AHEAD")
     drop?.stairsUpM?.takeIf { !it.isNaN() }?.let {
-        return Safety(Level.CAUTION, Glyph.WARN, "STAIRS UP", null, "Steps going up ahead.", it, "AHEAD")
+        val n = drop.stairsUpSteps
+        return Safety(Level.CAUTION, Glyph.WARN, "STAIRS UP", null, if (n >= 2) "About $n steps going up." else "Steps going up ahead.", it, "AHEAD")
     }
     if (drop?.state == DropState.PATH_NOT_TRAVERSABLE) {
         val r = drop.pathReason
@@ -101,7 +104,7 @@ fun safetyOf(s: HudState): Safety {
         else Safety(Level.CAUTION, Glyph.WARN, "CAN'T JUDGE PATH", null, "Use your cane.")
     }
     val obstacle = s.tracks.filter { it.sure && inPath(it) && !it.metres.isNaN() && it.metres < Settings.closeM }.minByOrNull { app.nadaka.urgency(it) }
-    if (obstacle != null) return Safety(Level.CAUTION, Glyph.WARN, obstacle.label.uppercase(), null, "In your path.", obstacle.metres, directionOf(obstacle.bearing))
+    if (obstacle != null) return Safety(Level.CAUTION, Glyph.WARN, app.nadaka.displayName(obstacle.label).uppercase(), null, "In your path.", obstacle.metres, directionOf(obstacle.bearing))
     s.hazards.waistAtM?.let {
         return Safety(Level.CAUTION, Glyph.WARN, "OBSTACLE", null, "Something at waist height.", it, "AHEAD")
     }

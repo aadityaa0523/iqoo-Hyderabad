@@ -61,12 +61,12 @@ fun clock(bearingRad: Float): String {
  * and which of several objects to announce/show first. Higher = more dangerous to walk into.
  * Vehicles > people > animals > street furniture > everything else.
  */
-fun priorityOf(label: String): Float = when (label) {
-    "car", "bus", "truck", "motorcycle", "bicycle", "train" -> 1.8f
-    "person" -> 1.5f
-    "dog", "horse", "cow", "cat", "sheep", "elephant", "bear" -> 1.4f
-    "fire hydrant", "stop sign", "parking meter", "bench", "chair", "potted plant", "suitcase" -> 1.2f
-    else -> 1f
+fun priorityOf(label: String): Float = when (categoryOf(label)) {
+    Category.VEHICLE -> 1.8f
+    Category.PERSON -> 1.5f
+    Category.ANIMAL -> 1.4f
+    Category.SEAT, Category.FURNITURE -> 1.2f
+    Category.OTHER -> if (label in setOf("fire hydrant", "stop sign", "parking meter", "potted plant", "suitcase")) 1.2f else 1f
 }
 
 /** Lower = pick first: distance shortened by priority (a car at 4 m outranks a cup at 2 m). */
@@ -82,7 +82,7 @@ data class Hazards(
     val waistAtM: Float? = null, // table top, counter, railing: 0.45-1.2 m high, often with open space below
 )
 
-private fun name(t: Track) = t.label
+private fun name(t: Track) = displayName(t.label)
 
 fun inPath(t: Track, halfDeg: Float = Settings.pathHalfDeg) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < halfDeg
 
@@ -222,7 +222,7 @@ class AlertPolicy {
         staticSaidMs["${t.label}@${clock(t.bearing)}"] = now
         lastInfoMs = now
         val c = clock(t.bearing)
-        val words = phrase(t.label.replaceFirstChar { it.uppercase() }, metres(t.metres), c)
+        val words = phrase(name(t).replaceFirstChar { it.uppercase() }, metres(t.metres), c)
         return listOf(Alert(words, if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE, short = words))
     }
 }

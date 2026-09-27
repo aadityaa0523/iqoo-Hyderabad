@@ -31,6 +31,10 @@ class Actions(
     val addContact: () -> Unit,
     val removeContact: (Int) -> Unit,
     val testSms: () -> Unit,
+    val route: () -> app.nadaka.AiStatus?,
+    val languageChanged: () -> Unit,
+    val openAccessibility: () -> Unit,
+    val quickLaunchOn: () -> Boolean,
 )
 
 /**
@@ -78,6 +82,7 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
     private var lastFrameMs = SystemClock.elapsedRealtime()
     private var shownLevel: Level? = null
     private var pulse: ValueAnimator? = null
+    private var bars = intArrayOf(0, 0, 0, 0) // status / navigation bar sizes (the frame sits inside them)
 
     init {
         column.addView(header, LinearLayout.LayoutParams(-1, -2))
@@ -90,7 +95,11 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
         root.addView(diagnostics.view, FrameLayout.LayoutParams(-1, -1))
         root.setOnApplyWindowInsetsListener { _, insets ->
             val b = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            column.setPadding(b.left, b.top, b.right, b.bottom)
+            bars = intArrayOf(b.left, b.top, b.right, b.bottom)
+            // Room inside the frame so nothing touches the border.
+            val f = t.ipx(FRAME_INSET + 4f)
+            column.setPadding(b.left + f, b.top + f, b.right + f, b.bottom + f)
+            applyFrame()
             settings.view.setPadding(b.left, b.top, b.right, b.bottom)
             diagnostics.view.setPadding(b.left, b.top, b.right, b.bottom)
             insets
@@ -136,9 +145,18 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
     }
 
     /** Theme, text size or contrast changed: rebuild every style (live preview behind the settings). */
+    /** A rounded frame around the whole screen, just inside the status and navigation bars. */
+    private fun applyFrame() {
+        val i = t.ipx(FRAME_INSET)
+        root.foreground = android.graphics.drawable.InsetDrawable(
+            t.box(android.graphics.Color.TRANSPARENT, t.accent, if (t.hc) 3f else 2f, 34f),
+            bars[0] + i, bars[1] + i, bars[2] + i, bars[3] + i)
+    }
+
     fun restyle() {
         t = Theme(act)
         root.setBackgroundColor(t.bg)
+        applyFrame()
         val g = t.ipx(Theme.GAP)
         header.setPadding(t.ipx(24f), t.ipx(12f), t.ipx(24f), t.ipx(12f))
         brand.setTextColor(t.text); brand.typeface = t.black; t.size(brand, 24f); brand.letterSpacing = 0.12f
@@ -249,7 +267,7 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
         status.contentDescription = "${sf.status.lowercase()}${if (heat.isNotEmpty()) ", phone ${s.heat.name.lowercase()}" else ""}"
 
         // Hero badge + description
-        setIfChanged(heroBadge, null) // one view only now
+        setIfChanged(heroBadge, if (Prefs.heroMode == HeroMode.CAMERA) null else Prefs.heroMode.label.uppercase())
         val edge = s.drop?.candidate != null && s.drop.state.let { it == app.nadaka.drop.DropState.POSSIBLE_DROP || it == app.nadaka.drop.DropState.CONFIRMED_DROP }
         hero.contentDescription = (if (edge) "Depth map showing a detected floor edge." else "Live ${Prefs.heroMode.label.lowercase()} view.") +
             ""
@@ -269,9 +287,9 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
             val dist = if (tr.metres.isNaN()) "" else metresShort(tr.metres)
             val dir = directionOf(tr.bearing)
             setIfChanged(row.getChildAt(0) as TextView, dist)
-            setIfChanged(row.getChildAt(1) as TextView, tr.label.uppercase() + if (tr.approaching) " · COMING" else "")
+            setIfChanged(row.getChildAt(1) as TextView, app.nadaka.displayName(tr.label).uppercase() + if (tr.approaching) " · COMING" else "")
             setIfChanged(row.getChildAt(2) as TextView, dir)
-            row.contentDescription = "${tr.label}${if (tr.approaching) ", coming toward you" else ""}${if (dist.isEmpty()) "" else ", ${metresWords(tr.metres)}"}, ${dir.lowercase()}"
+            row.contentDescription = "${app.nadaka.displayName(tr.label)}${if (tr.approaching) ", coming toward you" else ""}${if (dist.isEmpty()) "" else ", ${metresWords(tr.metres)}"}, ${dir.lowercase()}"
         }
     }
 
@@ -342,6 +360,8 @@ class LiveScreen(private val act: Activity, private val preview: View, private v
     }
 
     val latest get() = state
+
+    private companion object { const val FRAME_INSET = 6f } // dp from the screen edge to the frame
     val settingsOpen get() = settings.open || diagnostics.open
 
     /** Back: close the top layer. Returns false when nothing was open. */

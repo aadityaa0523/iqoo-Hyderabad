@@ -336,5 +336,23 @@ class DropTest {
         val platform = List(6) { step(at = 2f, drop = 1.5f, seed = it) }
         assertTrue(states(run(DropPipeline(false), platform)).contains(DropState.CONFIRMED_DROP))
     }
+
+    // ---------- step counting ----------
+
+    @Test fun stairsUpAreCounted() {
+        val o = run(DropPipeline(false), List(5) { stairsUp(2f, seed = it) })
+        assertTrue("steps up ${o.last().stairsUpSteps}", o.last().stairsUpSteps >= 2)
+    }
+
+    @Test fun stairsDownAreCountedButOneStepOrADeepDropIsNot() {
+        // Steps below the top one are only visible from close (from 2 m back they hide behind the edge).
+        val stairs = run(DropPipeline(false), List(5) { stairsDown(at = 1.1f, seed = it) }).last()
+        assertTrue("stairs down ${stairs.stairsDownSteps}", stairs.stairsDownSteps >= 2)
+        val kerb = run(DropPipeline(false), List(5) { step(drop = 0.15f, at = 1.8f, seed = it) }).last()
+        assertTrue("kerb ${kerb.stairsDownSteps}", kerb.stairsDownSteps < 2)
+        val platform = run(DropPipeline(false), List(6) { step(at = 2f, drop = 1.5f, seed = it) }).last()
+        assertTrue("platform ${platform.stairsDownSteps}", platform.stairsDownSteps < 2)
+    }
+
 }
 

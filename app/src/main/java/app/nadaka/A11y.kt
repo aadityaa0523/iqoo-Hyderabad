@@ -45,7 +45,7 @@ object Prefs {
     var simplified = false      // hide annotations and object list: safety state only
     var depthHc = false         // depth map as brightness bands + contour lines
     var reducedMotion = false
-    var heroMode = app.nadaka.ui.HeroMode.BLEND
+    var heroMode = app.nadaka.ui.HeroMode.CAMERA
     // Calibration (Calibration.kt). Applied to Settings on load.
     var calibrated = false
     var calibratedAtMs = 0L
@@ -56,6 +56,8 @@ object Prefs {
     var vfovDeg = Float.NaN
     var strideM = Float.NaN
     var contacts: List<Contact> = emptyList() // emergency contacts, at most 2
+    var speechLang = SpeechLang.EN
+    var aiMode = AiMode.ON_DEVICE    // demo-safe default: the phone answers; "Cloud when online" is one tap in Settings
 
     val lowVision get() = palette.highContrast && textScale >= 1.3f
 
@@ -74,7 +76,8 @@ object Prefs {
         depthHc = p.getBoolean("depthHc", false)
         val systemNoMotion = android.provider.Settings.Global.getFloat(ctx.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
         reducedMotion = p.getBoolean("reducedMotion", systemNoMotion)
-        heroMode = runCatching { app.nadaka.ui.HeroMode.valueOf(p.getString("heroMode", "BLEND")!!) }.getOrDefault(app.nadaka.ui.HeroMode.BLEND)
+        // New key: earlier builds saved BLEND by default; camera-only is the default now.
+        heroMode = runCatching { app.nadaka.ui.HeroMode.valueOf(p.getString("heroMode2", "CAMERA")!!) }.getOrDefault(app.nadaka.ui.HeroMode.CAMERA)
         calibrated = p.getBoolean("calibrated", false)
         calibratedAtMs = p.getLong("calibratedAtMs", 0L)
         bodyHeightM = p.getFloat("bodyHeightM", Float.NaN)
@@ -83,6 +86,8 @@ object Prefs {
         hfovDeg = p.getFloat("hfovDeg", Float.NaN)
         vfovDeg = p.getFloat("vfovDeg", Float.NaN)
         strideM = p.getFloat("strideM", Float.NaN)
+        aiMode = runCatching { AiMode.valueOf(p.getString("aiMode", "ON_DEVICE")!!) }.getOrDefault(AiMode.ON_DEVICE)
+        speechLang = runCatching { SpeechLang.valueOf(p.getString("speechLang", "EN")!!) }.getOrDefault(SpeechLang.EN)
         contacts = p.getString("contacts", "").orEmpty().lines().mapNotNull { l ->
             l.split('\t').takeIf { it.size == 2 }?.let { Contact(it[0], it[1]) } }
         if (!strideM.isNaN()) Settings.strideM = strideM
@@ -95,10 +100,10 @@ object Prefs {
         .putBoolean("announce", announce).putBoolean("wizardDone", wizardDone)
         .putBoolean("hapticsFirst", Settings.hapticsFirst).putBoolean("chatty", Settings.chatty)
         .putBoolean("audioOn", audioOn).putBoolean("hapticOn", hapticOn).putBoolean("simplified", simplified)
-        .putBoolean("depthHc", depthHc).putBoolean("reducedMotion", reducedMotion).putString("heroMode", heroMode.name)
+        .putBoolean("depthHc", depthHc).putBoolean("reducedMotion", reducedMotion).putString("heroMode2", heroMode.name)
         .putBoolean("calibrated", calibrated).putLong("calibratedAtMs", calibratedAtMs).putFloat("bodyHeightM", bodyHeightM)
         .putFloat("cameraHeightM", cameraHeightM).putFloat("depthScale", depthScale).putFloat("hfovDeg", hfovDeg)
-        .putFloat("vfovDeg", vfovDeg).putFloat("strideM", strideM)
+        .putFloat("vfovDeg", vfovDeg).putFloat("strideM", strideM).putString("speechLang", speechLang.name).putString("aiMode", aiMode.name)
         .putString("contacts", contacts.joinToString("\n") { "${it.name}\t${it.number}" }).apply()
 
     /** One switch for the whole "Low Vision / Senior" profile. */

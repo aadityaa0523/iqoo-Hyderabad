@@ -63,9 +63,17 @@ class Detector(ctx: Context, only: Backend? = null) {
 
     fun close() { interpreter.close(); runCatching { delegate?.close() } }
 
+    // Reused letterbox canvas: the frame is fitted (not stretched) into the square input, grey padding around it.
+    private val square by lazy { Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888) }
+    private val squareCanvas by lazy { android.graphics.Canvas(square) }
+    private val fitPaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+
     fun detect(frame: Bitmap, minScore: Float): List<Detection> {
         val t0 = System.nanoTime()
-        Bitmap.createScaledBitmap(frame, size, size, true).getPixels(pixels, 0, size, 0, 0, size, size)
+        val (scale, padX, padY) = letterbox(frame.width, frame.height, size)
+        squareCanvas.drawColor(0xFF727272.toInt()) // YOLOX's padding grey (114)
+        squareCanvas.drawBitmap(frame, null, android.graphics.RectF(padX, padY, padX + frame.width * scale, padY + frame.height * scale), fitPaint)
+        square.getPixels(pixels, 0, size, 0, 0, size, size)
         // Fill a plain array, then one bulk copy: per-element ByteBuffer.put was 1.2 M JNI-checked calls a frame.
         var k = 0
         for (p in pixels) { rgb[k++] = (p shr 16).toByte(); rgb[k++] = (p shr 8).toByte(); rgb[k++] = p.toByte() }
@@ -84,9 +92,12 @@ class Detector(ctx: Context, only: Backend? = null) {
         for (i in 0 until n) {
             val score = ss * ((scores.get(i).toInt() and 0xFF) - sz)
             if (score < minScore) continue
-            fun c(k: Int) = (bs * ((boxes.get(4 * i + k).toInt() and 0xFF) - bz) / size).coerceIn(0f, 1f)
             val label = labels.getOrElse(classes.get(i).toInt() and 0xFF) { "object" }
-            found += Detection(label, score, Box(c(0), c(1), c(2), c(3)))
+            if (!keepDetection(label, score, minScore)) continue
+            fun px(k: Int) = bs * ((boxes.get(4 * i + k).toInt() and 0xFF) - bz) // model-input pixels
+            found += Detection(label, score, Box(
+                unletterbox(px(0), padX, scale, frame.width), unletterbox(px(1), padY, scale, frame.height),
+                unletterbox(px(2), padX, scale, frame.width), unletterbox(px(3), padY, scale, frame.height)))
         }
         return nms(found).also {
             val t3 = System.nanoTime()

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,7 +16,11 @@ android {
         versionCode = 1
         versionName = "0.1"
         ndk { abiFilters += "arm64-v8a" } // iQOO is arm64; keeps the APK small for phone downloads
+        // Cloud key from local.properties (git-ignored): never in the source or on GitHub.
+        val props = Properties().apply { rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) } }
+        buildConfigField("String", "OPENROUTER_KEY", "\"" + props.getProperty("openrouter.key", "") + "\"")
     }
+    buildFeatures { buildConfig = true }
 
     // Shared debug key so laptop (adb) and GitHub Actions builds install over each other.
     signingConfigs {
@@ -52,6 +58,7 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
     implementation("com.google.mlkit:text-recognition:16.0.1") // bundled Latin OCR, works offline
+    implementation("com.google.mlkit:translate:17.0.3") // English -> Hindi / Telugu answers, on-device after one download
     val qnn = "2.50.0" // Qualcomm Hexagon NPU delegate for LiteRT
     implementation("com.qualcomm.qti:qnn-litert-delegate:$qnn")
     implementation("com.qualcomm.qti:qnn-runtime:$qnn")

@@ -40,13 +40,18 @@ class DropDepthAnalyzer {
         val rf = medianOf(far, nf)
         val madN = mad(near, nn, rn)
         val madF = mad(far, nf, rf)
-        val confidence = valid * (1 - clamp01((madN + madF) / 0.25f)) * (1 - clamp01(abs(rn - 1f) / 0.4f))
-        val jump = rn - rf
+        // Judge the far side against the near side of the SAME frame (how much the floor drops beyond the edge), not
+        // against the saved ruler: Depth Anything's scale shifts with the scene, and on the phone the ruler test
+        // (near side ~1.0) failed half the time, leaving real stairs "unreliable". The ruler only has to be roughly
+        // right: the surface before the edge must still be my floor (within +-35 %), so a table top isn't taken for it.
+        val confidence = valid * (1 - clamp01((madN / rn + madF / rn) / 0.25f)) * (1 - clamp01(abs(rn - 1f) / 1.2f))
+        val rel = rf / rn                     // far side relative to the floor I'm standing on (1 = same level)
+        val jump = 1f - rel
         val verdict = when {
-            valid < C.DEPTH_MIN_VALID || confidence < C.DEPTH_MIN_CONFIDENCE -> DepthVerdict.UNRELIABLE
-            jump >= C.DEPTH_JUMP_THRESHOLD && rf < 0.95f -> DepthVerdict.SUPPORTS
-            abs(jump) < C.DEPTH_CONTINUITY_TOLERANCE && abs(rf - 1f) < 0.2f -> DepthVerdict.CONTRADICTS // floor continues
-            rf > rn + 0.1f -> DepthVerdict.CONTRADICTS // far side is nearer: an obstacle or wall, not a drop
+            valid < C.DEPTH_MIN_VALID || confidence < C.DEPTH_MIN_CONFIDENCE || abs(rn - 1f) > 0.35f -> DepthVerdict.UNRELIABLE
+            jump >= C.DEPTH_JUMP_THRESHOLD -> DepthVerdict.SUPPORTS
+            abs(jump) < C.DEPTH_CONTINUITY_TOLERANCE -> DepthVerdict.CONTRADICTS // floor continues
+            rel > 1.1f -> DepthVerdict.CONTRADICTS // far side is nearer: an obstacle or wall, not a drop
             else -> DepthVerdict.UNRELIABLE
         }
         return DepthResult(verdict, confidence, jump, valid, rn, rf, pts)
@@ -125,26 +130,21 @@ class GroundPlaneAnalyzer {
 }
 
 /**
- * Stairs going UP: the height profile along the walking corridor (through the floor ruler) first leaves the
- * floor, then keeps rising at a stair-like slope. A wall rises almost vertically (slope far above stairs),
- * a ramp too gently, a single kerb stops rising. Distance = where the first step starts. NaN = none.
+ * Stairs from the height profile along the walking corridor (through the floor ruler).
+ * UP: the profile leaves the floor, then keeps rising at a stair-like slope. A wall rises almost vertically, a
+ * ramp too gently, a single kerb stops rising. Distance = where the first step starts; [steps] = levels seen.
+ * DOWN ([stepsDown]): levels below the floor beyond a drop edge. Lower steps hide behind upper ones, so it is
+ * "at least" that many.
  */
 class StairsUpAnalyzer {
     private val ahead = FloatArray(80); private val height = FloatArray(80); private val tmpA = FloatArray(5); private val tmpH = FloatArray(5)
+    /** Steps counted in the last successful [analyze]. */
+    var steps = 0
+        private set
 
     fun analyze(depth: DepthInput?, geo: FloorGeometry?): Float {
-        if (depth == null || geo == null || !depth.floorTrusted || depth.ageMs > C.DEPTH_MAX_AGE_MS) return Float.NaN
-        var n = 0
-        var y = 0.96f
-        while (y > 0.30f && n < ahead.size) { // bottom (near) to top (far)
-            var k = 0
-            for (x in floatArrayOf(0.42f, 0.46f, 0.5f, 0.54f, 0.58f)) {
-                val p = geo.point(x, y, depth.at(x, y)) ?: continue
-                tmpA[k] = p[0]; tmpH[k] = p[2]; k++
-            }
-            if (k >= 3) { ahead[n] = medianOf(tmpA, k); height[n] = medianOf(tmpH, k); if (ahead[n] in 0.3f..6f) n++ }
-            y -= 0.01f
-        }
+        steps = 0
+        val n = sample(depth, geo)
         if (n < 10) return Float.NaN
         // First rise off the floor, after some floor right in front of the feet.
         var i0 = -1
@@ -162,7 +162,52 @@ class StairsUpAnalyzer {
         val den = m * sxx - sx * sx
         if (kotlin.math.abs(den) < 1e-6f) return Float.NaN // no spread in distance: a wall
         val slope = (m * sxy - sx * sy) / den
-        return if (slope in C.STAIRS_SLOPE_MIN..C.STAIRS_SLOPE_MAX) start else Float.NaN
+        if (slope !in C.STAIRS_SLOPE_MIN..C.STAIRS_SLOPE_MAX) return Float.NaN
+        steps = levels(0, n, +1)
+        return start
+    }
+
+    /** Steps down seen beyond a drop edge (0 = a single drop, not stairs). */
+    fun stepsDown(depth: DepthInput?, geo: FloorGeometry?): Int {
+        val n = sample(depth, geo)
+        return if (n < 10) 0 else levels(0, n, -1)
+    }
+
+    /** Distinct height levels in direction [dir] (+1 up, -1 down), each a step of 0.1-0.3 m held for 2+ samples. */
+    private fun levels(from: Int, n: Int, dir: Int): Int {
+        var level = 0f; var count = 0; var run = 0; var cand = 0f
+        for (i in from until n) {
+            val d = (height[i] - level) * dir
+            if (d > C.STAIR_STEP_MIN_M) {
+                if (run == 0 || kotlin.math.abs(height[i] - cand) < C.STAIR_STEP_MIN_M) { cand = height[i]; run++ } else { cand = height[i]; run = 1 }
+                if (run >= 2) {
+                    val change = (cand - level) * dir
+                    // Up: a big jump between visible treads hides steps; estimate them from a typical rise.
+                    // Down: the first steps hide behind the edge, so a big jump counts as one level only: a platform
+                    // (one big jump, then flat) stays at 1 = a drop; stairs add regular steps after it.
+                    count += if (change > C.STAIR_STEP_MAX_M && dir > 0) kotlin.math.round(change / C.STAIR_RISE_TYPICAL_M).toInt() else 1
+                    level = cand; run = 0
+                }
+            } else run = 0
+        }
+        return count
+    }
+
+    /** Corridor profile, near to far: (distance ahead, height above my floor). Returns the sample count. */
+    private fun sample(depth: DepthInput?, geo: FloorGeometry?): Int {
+        if (depth == null || geo == null || !depth.floorTrusted || depth.ageMs > C.DEPTH_MAX_AGE_MS) return 0
+        var n = 0
+        var y = 0.96f
+        while (y > 0.30f && n < ahead.size) { // bottom (near) to top (far)
+            var k = 0
+            for (x in floatArrayOf(0.42f, 0.46f, 0.5f, 0.54f, 0.58f)) {
+                val p = geo.point(x, y, depth.at(x, y)) ?: continue
+                tmpA[k] = p[0]; tmpH[k] = p[2]; k++
+            }
+            if (k >= 3) { ahead[n] = medianOf(tmpA, k); height[n] = medianOf(tmpH, k); if (ahead[n] in 0.3f..6f) n++ }
+            y -= 0.01f
+        }
+        return n
     }
 }
 

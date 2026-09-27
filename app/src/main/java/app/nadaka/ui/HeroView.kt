@@ -26,7 +26,10 @@ enum class HeroMode(val label: String) { BLEND("Depth + camera"), DEPTH("Depth")
  * Annotations are words + thick shapes: FLOOR, DROP EDGE, LOWER LEVEL, head height, objects.
  */
 class HeroView(ctx: Context) : View(ctx) {
-    companion object { const val SHOW_DEPTH = false } // the contour bands read as moving "waves": camera only
+    /** Diagnostics: always show the depth map, full strength, whatever the main-view setting. */
+    var forceDepth = false
+    private var loS = Float.NaN; private var hiS = Float.NaN // depth range smoothed over frames (no pulsing)
+    private val norm = FloatArray(DEPTH_COLS * 4 * DEPTH_ROWS * 4)
 
     private var s = HudState()
     private var safety = safetyOf(s)
@@ -58,9 +61,9 @@ class HeroView(ctx: Context) : View(ctx) {
         val w = width.toFloat(); val h = height.toFloat()
         if (w <= 0f) return
         val mode = Prefs.heroMode
-        if (SHOW_DEPTH && mode != HeroMode.CAMERA) s.depth?.let { g ->
+        if (forceDepth || mode != HeroMode.CAMERA) s.depth?.let { g ->
             buildDepth(g)
-            bmpPaint.alpha = if (mode == HeroMode.DEPTH || Prefs.camera == app.nadaka.CameraView.HIDDEN) 255 else 150
+            bmpPaint.alpha = if (forceDepth || mode == HeroMode.DEPTH || Prefs.camera == app.nadaka.CameraView.HIDDEN) 255 else 150
             c.drawBitmap(depthBmp, null, Rect(0, 0, width, height), bmpPaint)
         }
         val simplified = Prefs.simplified
@@ -85,6 +88,9 @@ class HeroView(ctx: Context) : View(ctx) {
         lastGrid = g; lastStyleHc = hcStyle
         var lo = Float.MAX_VALUE; var hi = -Float.MAX_VALUE
         for (r in g) for (v in r) { if (v < lo) lo = v; if (v > hi) hi = v }
+        // Rescaling every frame to its own min/max made the whole map pulse ("waves"): follow the range slowly.
+        if (loS.isNaN()) { loS = lo; hiS = hi } else { loS += 0.15f * (lo - loS); hiS += 0.15f * (hi - hiS) }
+        lo = loS; hi = hiS
         val span = (hi - lo).coerceAtLeast(1e-6f)
         val levels = 6
         for (y in 0 until bh) {
@@ -94,14 +100,21 @@ class HeroView(ctx: Context) : View(ctx) {
                 val gx = ((x + 0.5f) / up - 0.5f).coerceIn(0f, DEPTH_COLS - 1f)
                 val x0 = gx.toInt(); val x1 = min(x0 + 1, DEPTH_COLS - 1); val fx = gx - x0
                 val v = (g[y0][x0] * (1 - fx) + g[y0][x1] * fx) * (1 - fy) + (g[y1][x0] * (1 - fx) + g[y1][x1] * fx) * fy
-                band[y * bw + x] = (((v - lo) / span) * levels).toInt().coerceIn(0, levels - 1) // 5 = nearest
+                val f = ((v - lo) / span).coerceIn(0f, 1f) // 1 = nearest
+                norm[y * bw + x] = f
+                band[y * bw + x] = (f * levels).toInt().coerceIn(0, levels - 1)
             }
         }
         for (i in px.indices) {
+            if (!hcStyle) { // standard: a smooth gradient, near = bright; no bands, no contour lines
+                val f = norm[i]
+                px[i] = mix(0xFF0B1A2A.toInt(), 0xFFBFEFFF.toInt(), f * f); continue
+            }
+            // High-contrast accessibility style: brightness bands with contour lines (readable without colour).
             val b = band[i]
             val x = i % bw
             val edge = (x + 1 < bw && band[i + 1] != b) || (i + bw < px.size && band[i + bw] != b)
-            px[i] = if (edge) (if (hcStyle) t.text else 0xFFFFFFFF.toInt()) else shade(b, levels, hcStyle)
+            px[i] = if (edge) t.text else shade(b, levels, true)
         }
         depthBmp.setPixels(px, 0, bw, 0, 0, bw, bh)
     }
@@ -178,7 +191,7 @@ class HeroView(ctx: Context) : View(ctx) {
             }
         }
         val dist = if (tr.metres.isNaN()) "" else "  ${metresShort(tr.metres)}"
-        chip(c, "${tr.label.uppercase()}$dist", r.left, (r.top - t.px(52f)).coerceAtLeast(t.px(8f)), t.surface, t.text, sp = Theme.LABEL)
+        chip(c, "${app.nadaka.displayName(tr.label).uppercase()}$dist", r.left, (r.top - t.px(52f)).coerceAtLeast(t.px(8f)), t.surface, t.text, sp = Theme.LABEL)
     }
 
     /** A solid label plate: text never sits directly on the camera image. */

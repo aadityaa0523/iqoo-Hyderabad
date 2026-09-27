@@ -83,6 +83,12 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
         }
         choice("Visual detail", listOf("Standard", "Simplified"), if (Prefs.simplified) 1 else 0) { Prefs.simplified = it == 1 }
         choice("Motion", listOf("Reduced", "Standard"), if (Prefs.reducedMotion) 0 else 1) { Prefs.reducedMotion = it == 0 }
+        choice("Main view", listOf(HeroMode.CAMERA, HeroMode.BLEND, HeroMode.DEPTH).map { it.label },
+            listOf(HeroMode.CAMERA, HeroMode.BLEND, HeroMode.DEPTH).indexOf(Prefs.heroMode)) {
+            Prefs.heroMode = listOf(HeroMode.CAMERA, HeroMode.BLEND, HeroMode.DEPTH)[it]
+        }
+        if (Prefs.heroMode != HeroMode.CAMERA) choice("Depth map colours", listOf("Smooth", "High contrast"), if (Prefs.depthHc) 1 else 0,
+            "Depth map colours. High contrast uses brightness bands and contour lines.") { Prefs.depthHc = it == 1 }
         choice("Camera image", CameraView.entries.map { it.label }, Prefs.camera.ordinal) { Prefs.camera = CameraView.entries[it] }
         toggle("Low vision preset", Prefs.lowVision, "Maximum contrast, extra large text, high contrast camera and depth.") { Prefs.applyLowVision(it) }
 
@@ -94,6 +100,10 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
             else "Not calibrated yet. Voice-guided: say your height, hold the phone, then two short walks: press volume down, walk, press again.",
             Theme.LABEL, t.textDim).apply { setPadding(t.ipx(4f), t.ipx(6f), 0, 0) })
 
+        section("Cloud AI")
+        choice("Answer questions", app.nadaka.AiMode.entries.map { it.label }, Prefs.aiMode.ordinal,
+            "Where questions like what is this are answered") { Prefs.aiMode = app.nadaka.AiMode.entries[it] }
+
         section("Emergency contacts")
         Prefs.contacts.forEachIndexed { i, c -> action("Remove ${c.name}") { actions.removeContact(i); changed() } }
         if (Prefs.contacts.size < 2) action("Add emergency contact") { actions.addContact() }
@@ -103,7 +113,16 @@ class SettingsScreen(private val act: Activity, private val screen: LiveScreen, 
             else "They get a text with your location when the siren starts: " + Prefs.contacts.joinToString(", ") { it.name } + ".",
             Theme.LABEL, t.textDim).apply { setPadding(t.ipx(4f), t.ipx(6f), 0, 0) })
 
+        section("Quick launch")
+        list.addView(t.label(
+            if (actions.quickLaunchOn()) "On: press volume up three times quickly to open Nadaka from anywhere."
+            else "Press volume up three times to open Nadaka from anywhere. Turn on Nadaka quick launch in Android accessibility settings once.",
+            Theme.LABEL, t.textDim).apply { setPadding(t.ipx(4f), t.ipx(6f), 0, 0) })
+        if (!actions.quickLaunchOn()) action("Open accessibility settings") { actions.openAccessibility() }
+
         section("Alerts")
+        choice("Voice language", app.nadaka.SpeechLang.entries.map { it.label }, Prefs.speechLang.ordinal,
+            "Voice language for alerts") { Prefs.speechLang = app.nadaka.SpeechLang.entries[it]; actions.languageChanged() }
         toggle("Audio", Prefs.audioOn, if (Prefs.audioOn) null else "Spoken alerts are off.") { Prefs.audioOn = it }
         toggle("Haptic", Prefs.hapticOn, if (Prefs.hapticOn) null else "Vibration alerts are off.") { Prefs.hapticOn = it }
         if (!Prefs.audioOn && !Prefs.hapticOn) note("Audio and haptic are both off. Only the screen will warn you.")

@@ -1,189 +1,138 @@
 # Nadaka
 
-**An offline walking companion for blind and low-vision people, running entirely on an iQOO phone.**
+**A walking safety companion for blind and low-vision people, running entirely on an iQOO phone.**
 Built at the iQOO Hackathon 2026, Hyderabad (26–27 Sep 2026).
 
-Nadaka is worn at chest height, camera facing forward. It warns about what a white cane can't
-reach in time (drop-offs, head-height obstacles, things coming at you), reads money, medicine and
-signs, and answers questions about the scene. It **complements the cane; it never replaces it.**
+Nadaka is worn at chest height, camera facing forward. While you walk, it watches the path and warns about what a
+white cane can't reach in time: **drop-offs and stairs, head- and waist-height obstacles, and things coming at you**.
+It also reads money, medicine, bus numbers and signs, and answers questions about the scene.
+It **complements the cane; it never replaces it.** It never says "safe to cross" or "the path is clear".
 
-Everything runs on the phone: no internet, no cloud, no images leave the device.
+Everything safety-related runs on the phone's **Snapdragon NPU, fully offline**.
+
+---
+
+## Why it's different
+
+Apps like Lookout, Seeing AI, Envision and Be My Eyes answer when you *ask* ("what is this?", "read this").
+Nadaka **watches continuously while you walk** and warns on its own, offline, on one ordinary phone:
+
+1. **Metric depth from a single camera, calibrated by the user in 30 s.** Depth Anything gives only relative depth;
+   a voice-guided calibration (your height + two short walks) turns it into metres using the floor as a ruler.
+2. **Drop-off detection that doesn't cry wolf.** A drop is confirmed only when four independent checks agree over
+   several frames: a visual edge, depth falling away, the floor plane breaking, and not an object's outline.
+   Shadows, rugs, tiles, painted lines and shiny floors are rejected (tested).
+3. **"Is it coming at me, or am I walking into it?"** Your own walking (step sensor) and turning (gyroscope) are
+   subtracted before an object is called "approaching".
+4. **A vision-language model on the NPU, with safety rules.** Qwen3-VL answers in ~1 s offline; its answers are
+   filtered so it can never green-light movement.
 
 ---
 
 ## Features
 
-### Seeing (all on-device)
-
-| Feature | How |
+### Walking safety (always on, offline)
+| Feature | What you get |
 |---|---|
-| Object detection (80 COCO classes: people, chairs, vehicles, dogs, bags…) | **YOLOX** int8 on the **Hexagon NPU** (Qualcomm QNN), ~22 ms/frame |
-| Distance in metres | **Depth Anything V2** on the NPU (FP16); the floor is used as a ruler |
-| **Drop-offs** (stairs down, drains) and **kerbs / single steps** | Floor looks farther than a flat floor would; needs corridor width, a sharp lip and consistent tracking (see below) |
-| **Head-height obstacles** (branches, shelves, awnings) | Near depth at 1.2–2.1 m height with free space below |
-| Unnamed obstacles (walls, poles) | Depth: floor looks nearer than it should |
-| **Approaching vs merely near** | **Ego-motion**: your own walking (step detector) and turning (gyroscope) are subtracted |
-| Moving vs static | Forward/sideways speed after removing your own motion; furniture can never "move" |
-| Confidence | An object is used only when seen on 5+ frames, fully in view, with depth and size agreeing. **Unsure objects stay silent; it never says "maybe".** |
+| Obstacles | People, vehicles, animals, furniture and other objects with distance and direction ("chair, 2 metres, 1 o'clock") |
+| **Drop-offs** | Steps, kerbs, stairs down, platform edges: "Stop. Drop ahead" + **5 s of vibration** |
+| **Stairs up** | "Stairs going up ahead, 2 metres. About 8 steps." (not mistaken for a wall) |
+| Step counting | About N steps going up; at least N steps going down (lower steps hide behind the edge) |
+| Head height | Branches, signboards: "Stop, head height" |
+| Waist height | Table tops and counters with open space underneath |
+| Approaching | Something coming toward you (your own motion removed) |
+| Blocked path | "Blocked ahead" when something fills the view |
+| Camera problems | "Can't see: covered / too dark / blurry. Use your cane." Never a fake warning |
+| Torch | On after 1 s of real darkness; checks the room's own light every 8 s and turns itself off |
+| Heat | Shown (WARM / PHONE HOT); features are never cut |
 
-**Drop-off detection (v2)**: all of these must hold:
-- walking (steps detected), chest-like camera angle (−5° to 35°);
-- a floor ruler agreed over 5 frames, and the ground under the feet matching it (rejects table tops);
-- ≥ 60 % of the walking corridor drops (rejects dark tiles, shadows);
-- a big drop (> 45 % farther than flat floor) → **"Stop. Drop."**, or a small one (> 8 %) with a sudden lip → **"Step down."**;
-- the edge distance follows the user's walking speed frame to frame (rejects noise);
-- no table/bed/couch covering the bottom-centre of the view.
+### Asking (press volume up, then speak)
+"What is this?" · "Read the sign" · "Find the door / exit / stairs / lift" · "Find the chair / bottle / bag" ·
+"Read the lift buttons" · "What's the room number?" · "Walk straight" · "Is it safe?" (never says yes) ·
+"Teach me the vibrations" · "I'm sitting" / "I'm on a bus" · "Stop"
 
-### Telling the user: vibration first
+### Reading
+Currency notes (denomination + running total) · medicine strips (name, strength, expiry) ·
+**bus route numbers** read automatically ("Bus 218") · signs and text · lift panels and room numbers.
 
-Blind pedestrians navigate by hearing, so Nadaka speaks as little as possible.
-Research basis in [`docs/haptics.md`](docs/haptics.md) (Brewster & Brown 2004, van Erp 2002, Cassinelli et al. 2006).
+### Emergency
+- **Fall detection** (real falls of 50 cm+): "Fall detected. Press a volume key if you're OK."
+- No press in 7 s: a continuous **siren** + an **SMS with GPS location** to up to 2 emergency contacts (GPS works offline).
+- Manual emergency: hold both volume keys for 2 s. The fall / emergency screen outranks everything.
 
-| Meaning | You feel | You hear |
-|---|---|---|
-| Something in your path | Ticks, faster as it gets closer (from 2.5 m; near-continuous under 0.75 m); stop 1 s after you stop approaching | – |
-| Something approaching | Four taps getting faster | – |
-| Drop-off / step | Three long heavy pulses | "Stop. Drop." / "Step down." |
-| Head-height obstacle | Two rising swells | "Head." |
-| Camera can't see | Two soft pulses | "Camera blocked / Too dark. Use your cane." |
+### Feedback and languages
+- **Vibration first**: distinct patterns for drop-off, head height, approaching, sounds, drifting, can't see.
+- **Sound awareness**: horns, sirens, bells, reversing beeps, barking dogs.
+- **English, Hindi, Telugu**: alerts from fixed, accurate sentences; AI answers translated on the phone, offline.
+- Indian names: bike, cycle, lorry, traffic signal.
+- Silent while the mic is open; a short quiet gap after answers.
 
-Awareness (spoken briefly, once per object):
-- **static objects within 5 m** ahead: "Chair, 3 metres, 12 o'clock.";
-- **moving objects within 10 m**: "Person moving, 8 metres, 1 o'clock.";
-- crowds: "Crowd ahead." instead of repeating "person".
+### Setup and accessibility
+- **One-button calibration** (Settings > Calibrate, voice-guided, ~30 s).
+- **Quick launch**: volume up × 3 opens Nadaka from anywhere (one-time accessibility setup).
+- Low-vision UI: 4 text sizes, 3 contrast levels, simplified view, reduced motion, high-contrast camera, full TalkBack.
+- Audio / haptic switches; main view: camera, depth + camera, or depth map.
 
-Directions use the **clock face** (12 o'clock = straight ahead), as taught in orientation & mobility training.
-Spoken answers are never cut off by routine alerts; only danger interrupts.
-
-### Voice questions (volume-up, wait for the double buzz, speak)
-
-On-device speech recognition (offline English pack), keeps listening up to 8 s until you start talking.
-
-| You say | Nadaka |
-|---|---|
-| "What's ahead?" | **Local Gemma 4 E2B** looks at the camera frame (plus detector facts) and describes the scene |
-| "Read the sign" / "What does it say?" | Gemma reads the text and gives its meaning, translating Hindi/Telugu |
-| Any other question ("Is the door open?") | Gemma answers from the camera |
-| "Is it safe to cross?" / "Can I walk?" (English, Hindi, Telugu) | **Never "yes".** A fixed answer built from the last 1.5 s of sensor facts, handing the decision back to the cane |
-| "Read this note / medicine" | Starts PAY / MEDS reading |
-| "Use speech" / "Use vibration" | Full sentences vs vibration first |
-| "Tell me more" / "Tell me less" | Chatty vs quiet |
-| "Teach me the vibrations" | Plays each pattern with its meaning |
-
-**Safety gate:** safety questions are caught before anything else and never reach Gemma; every Gemma
-answer is scanned and discarded if it contains a movement green-light ("path is clear", "you can go",
-"no obstacles"…).
-
-### Hearing, finding, emergency
-
-- **Danger sounds (360°):** YAMNet (521 sound classes) on the microphone: **horn, siren, vehicle reversing,
-  bicycle bell, dog barking** → long-short-long vibration + "Horn nearby." Paused while you ask a question
-  and inside vehicles.
-- **Find:** "find a chair", "where is my phone", "find a person" → "Chair, 2 o'clock, 3 metres" until it is
-  within reach ("right in front of you"). Things the detector doesn't know (a door) are located by Gemma.
-  "Stop" cancels.
-- **Emergency:** hold **both volume keys for 2 s** (or say "help me"): loud alarm, strong vibration, spoken
-  call for help with the battery level. Any volume key stops it.
-- **Voice-set modes:** "I'm sitting" (only warns about things coming at you), "I'm on the bus",
-  "let's go"; holds for 5 minutes.
-
-### Reading (volume-down)
-
-On-device ML Kit OCR with voice coaching ("Move closer", "Hold still"); answers only after two matching
-frames, otherwise "Can't read clearly. I won't guess."
-- **PAY:** note denomination + running total ("500 rupees. Total 700 rupees.").
-- **MEDS:** name, strength, expiry; "Warning: expired … Do not take."
-
-### Staying reliable
-
-- **Activity modes (automatic):** walking (full guidance) / standing (quiet, only what is at you) /
-  in a vehicle (depth and approach alerts paused: bus motion fakes them).
-- **Camera health:** blocked lens, dark (turns on the torch first), blurry, tilted.
-- **Thermal governor:** fuses Android thermal status, thermal headroom, battery temperature and its own
-  frame time vs the phone's learned cool speed; sheds work, tells the user once, and never stops the
-  safety loop (detection every 3rd frame, depth every 6th at worst). NPU runs in sustained (not burst) mode.
-- Low-battery warning.
-
-### Sighted view (judges, trainers, family via Office Kit screen mirroring)
-
-Header with on-device NPU timings and mode, corner-bracket boxes with distance, a radar with 5 m / 10 m
-rings, a depth thumbnail, a hazard banner, and a caption of exactly what the user feels and hears.
+### AI routing
+Questions are answered **on the phone (Qwen3-VL on the NPU)**, or, if chosen, by cloud models when online
+(OpenRouter), falling back to the phone instantly when offline, busy or slow. **Safety never uses the network.**
+Diagnostics shows which engine answered and why.
 
 ---
 
-## Models (all on-device)
+## Measured on the iQOO (Snapdragon, Hexagon NPU)
 
-| Model | Runtime / hardware | Source & licence |
-|---|---|---|
-| YOLOX (int8, 640×640) | LiteRT + QNN delegate, Hexagon NPU | Qualcomm AI Hub, Apache-2.0 |
-| Depth Anything V2 (FP16, 518×518) | LiteRT + QNN delegate, Hexagon NPU | Qualcomm AI Hub (listed as MIT) |
-| Gemma 4 E2B (multimodal) | LiteRT-LM, GPU | Downloaded by Google AI Edge Gallery; Gemma terms |
-| YAMNet (sound events) | LiteRT, CPU | Google / TensorFlow, Apache-2.0 |
-| ML Kit Text Recognition (Latin, bundled) | On-device | Google ML Kit |
-| Speech recognition | Android on-device recognizer | Google (system) |
+| Model | Backend | Time | Notes |
+|---|---|---|---|
+| YOLOX (int8, 80 classes) | Hexagon NPU (QNN) | ~4 ms total | 317/317 ops on the NPU |
+| Depth Anything V2 (FP16) | Hexagon NPU (QNN) | ~30 ms inference | 598/598 ops on the NPU |
+| Qwen3-VL-2B (Q4) image encoding | Hexagon NPU | 0.25 s | GPU 14–17 s, CPU 33 s |
+| Qwen3-VL-2B answer | Hexagon NPU | ~0.5–1.5 s | ~37 tokens/s |
 
-Fallback order for the vision models: NPU → GPU → CPU (the screen shows which one loaded).
+Full benchmark: [docs/npu-benchmark.md](docs/npu-benchmark.md) and `docs/Nadaka_NPU_Benchmark_Report.pdf`.
+Live check in the app: **Menu > Diagnostics** (backends, timings, NPU delegation, live depth map, drop-off evidence).
 
-## Where to use it
+---
 
-Best in **flat, built environments**: college/office campuses, hospitals, station concourses, malls,
-building interiors. **Not yet for:** busy road crossings (side traffic), hills and slopes, railway
-platform edges, heavy rain / fog.
+## Architecture
+
+```
+Camera2 (logical camera, 640x480 frames, rate-limited by activity: 10 / 5 / 3 / 2 fps)
+  │
+  ├─ YOLOX on NPU ──► letterboxed input, per-class confidence ──► Tracker
+  │                   (category matching + label vote, ego-motion: approaching vs merely near)
+  │
+  ├─ Depth Anything V2 on NPU ──► floor ruler (calibrated metres)
+  │       ├─ drop-off pipeline: edge lattice + depth jump + ground plane + object suppression
+  │       │   → evidence history → state machine (SAFE / POSSIBLE / CONFIRMED)
+  │       ├─ stairs-up profile + step counting, reflection guard
+  │       └─ head / waist / floor obstacles, object distances
+  │
+  ├─ IMU: steps, gyro, gravity, fall detector, walk-straight heading
+  │
+  └─► Alert policy (priority, repeat limits, never "safe") ──► vibration first ──► short speech
+                                                                (English / Hindi / Telugu)
+Voice questions ──► intent ──► on-device OCR / Qwen3-VL (NPU, llama.cpp) or cloud ──► safety filter ──► translate ──► speech
+```
+
+Key files: `MainActivity.kt` (loop), `Detector.kt` + `Perception.kt` + `Tracker.kt` (objects), `Depth.kt` +
+`drop/` (depth, drop-offs, stairs), `Calibration.kt`, `Fall.kt`, `Qwen.kt` + `Cloud.kt` (AI), `Lang.kt`
+(languages), `ui/` (screens).
+
+---
+
+## Build and run
+
+- Android Studio JBR: `JAVA_HOME = C:\Program Files\Android\Android Studio\jbr`
+- `./gradlew installDebug` (arm64, minSdk 31)
+- Qwen model files go in the app's files folder, `qwen/` (Qwen3VL-2B-Instruct-Q4_K_M.gguf + mmproj Q8_0); without them
+  the app falls back to Gemma, then to built-in answers.
+- Optional cloud key: `openrouter.key=...` in `local.properties` (git-ignored, never committed).
+- Tests: `./gradlew testDebugUnitTest` (162 unit tests: drop-offs and false alarms, stairs, falls, calibration,
+  tracking, languages, alerts).
 
 ## Honest limits
-
-- Glass doors, thin poles and wires are hard for any camera.
-- Distances beyond ~5 m are rough (±30 %).
-- One vibration motor: direction comes by voice (clock face), not vibration.
-- Drop-off detection is verified on synthetic 3-D scenes; real-world stairs/kerb validation is ongoing.
-
----
-
-## Build and install
-
-Requirements: Android Studio's JDK, Android SDK, an iQOO / Snapdragon 8-series phone (tested on SM8850, Android 16).
-
-```bash
-./gradlew testDebugUnitTest      # 78 unit tests
-./gradlew installDebug           # or push to main: GitHub Actions publishes the APK as release "latest"
-```
-
-**Gemma model** (once per phone, after the app has run once so it owns its folder):
-
-```bash
-adb shell cp /sdcard/Android/data/com.google.ai.edge.gallery/files/Gemma_4_E2B_it/*/gemma-4-E2B-it.litertlm /sdcard/Android/data/app.nadaka/files/
-```
-
-Offline speech: accept the "Download English (US)" prompt the first time you ask a question.
-
-## Training
-
-See [`training/README.md`](training/README.md).
-- **Ego-motion approach classifier:** long-press the screen to record walks, volume-up marks "approaching";
-  `python training/train_ego.py logs/*.csv` (numpy only, runs in Termux) → `assets/ego_model.json`.
-  Method: [`docs/ego-motion.md`](docs/ego-motion.md).
-- **Currency classifier:** MobileNetV3 fine-tuning in Termux on the phone (`training/train.py`).
-
-## Code map
-
-| File | What |
-|---|---|
-| `MainActivity.kt` | Camera loop, settings, wiring, speech/vibration output |
-| `Detector.kt` | YOLOX + NMS; NPU/GPU/CPU opener |
-| `Depth.kt` | Depth model, floor ruler, drop-off / head-height / obstacle analysis |
-| `Tracker.kt`, `EgoMotion.kt` | Tracking, ego-motion, time-to-contact, record mode |
-| `Alerts.kt` | What to say and when: priorities, ranges, habituation, camera health |
-| `Haptics.kt` | Vibration vocabulary and proximity ticks |
-| `Voice.kt`, `Gemma.kt` | Speech recognition, intents, safety gate, local Gemma |
-| `Reader.kt` | PAY / MEDS OCR rules |
-| `Activity.kt`, `Thermal.kt` | Activity modes, thermal governor |
-| `Sounds.kt`, `Find.kt` | Danger sounds (YAMNet), find guidance, emergency |
-| `Hud.kt` | Sighted view |
-
-## Roadmap
-
-- Blind-first screen gestures and spoken menu; first-run spoken tutorial; persistent settings.
-- Foreground service so it keeps running with the screen off.
-- Barometer check and one-tap mount calibration for drop-offs.
-- Object memory ("where did I leave my phone?").
-- CPU vs NPU benchmark screen; replay harness scoring real recorded walks.
+- Glass doors and mirrors: depth sees through them; the cane stays essential.
+- Stairs going down: steps are counted only within ~1.5 m (lower steps hide behind the edge).
+- Distances are best after calibration; beyond 10 m they're reported as unknown, not guessed.
+- Auto-rickshaws are detected as vehicles, not named "auto" (not a COCO class).

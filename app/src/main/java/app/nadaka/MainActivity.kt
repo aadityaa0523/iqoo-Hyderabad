@@ -87,7 +87,10 @@ object Settings {
     var healthRepeatMs = 8000L
     var blockedLuma = 20f
     var darkLuma = 35f
-    var torchOffLuma = 170f // torch stays on until the scene is this bright (daylight)
+    var torchOnMs = 1000L       // dark this long before the torch comes on (one dark frame is not enough)
+    var torchProbeMs = 8000L    // while on, look at the room's own light this often
+    var torchSettleMs = 700L    // torch off this long for the look (exposure settles)
+    var torchAmbientLuma = 55f  // the room alone is at least this bright: torch stays off
     var blurVar = 15f
     var minPitchDeg = -25f // camera looking up
     var maxPitchDeg = 45f  // camera looking at the floor
@@ -109,6 +112,12 @@ object Settings {
     var qwenDevice = "HTP0" // Hexagon NPU: image 0.25 s, answer ~2 s (GPU 14-17 s, CPU 33 s just to encode the image)
     var qwenImageTokens = 256 // cap; the full-resolution photo otherwise becomes thousands of tokens
     var qwenMaxTokens = 48 // short answers; also caps worst-case latency
+    // Cloud answers when online (Cloud.kt)
+    // Free OpenRouter vision models, tried in order (they are often busy). Not "openrouter/free": its router
+    // sent images to a safety classifier that answered "User Safety: safe".
+    var cloudModels = listOf("google/gemma-4-31b-it:free", "qwen/qwen3.8-27b:free", "google/gemma-4-26b-a4b-it:free")
+    var cloudTimeoutMs = 8000L   // slower than this: answered on the phone instead
+    var cloudBackoffMs = 60_000L
     var qwenContext = 1024
     var gemmaImagePx = 1024 // Gemma sees the full preview, not the 640x480 analysis frame
     var listenWindowMs = 8000L // after a press, wait this long for the user to start talking
@@ -155,7 +164,7 @@ object Settings {
     var answerGapMs = 3000L // after an answer (Gemma, "what's ahead"): no routine speech for this long, vibration only
 
     // Depth (Depth.kt). cameraHeightM is THE calibration knob: measure lens height on the wearer.
-    var depthEvery = 2 // run the depth model every Nth analysed frame
+    var depthEvery = 1 // depth on every analysed frame (30 ms on the NPU); every 2nd left standing users with stale depth
     var fpsWalking = 10
     var fpsStill = 5
     var fpsSitting = 3
@@ -177,6 +186,9 @@ object Settings {
     var fallStillG = 0.25f
     var fallTurnDeg = 45f        // and the phone ended up turned this much
     var fallCancelMs = 7000L
+    var dropHapticMs = 5000 // a confirmed drop-off vibrates this long
+    var heatThrottle = false // heat is only shown (header, Diagnostics); set true to slow work down when hot
+    var quickLaunchMs = 1500L // volume up x3 within this opens Nadaka from anywhere (QuickLaunch.kt)
     // Walk straight (Straight.kt)
     var veerDeg = 10f
     var veerHoldMs = 1000L
@@ -189,6 +201,9 @@ object Settings {
     var busMinBoxH = 0.12f  // bus must fill this much of the frame height (close enough to read)
     var busVotes = 2
     var busMaxTries = 6
+    // Finding things YOLO has no class for (doors, exits, stairs, lifts...) with Qwen
+    var sceneFindMs = 2500L
+    var sceneFindMaxMs = 30_000L
     var stairsRepeatMs = 7000L     // "press a volume key if you're OK" window before the siren
     var calStepTimeoutMs = 25_000L
     var calWalkTimeoutMs = 30_000L  // per walk, counted from its first volume-down press
@@ -210,7 +225,7 @@ object Settings {
     var scaleLockFrames = 5 // consistent floor frames before the depth ruler is trusted
     var scaleTolerance = 1.6f // a "floor" whose scale differs more than this is a table top, not the floor
     var hazardPitchMinDeg = -5f // depth hazards only with a chest-worn camera looking ahead / slightly down
-    var hazardPitchMaxDeg = 35f
+    var hazardPitchMaxDeg = 55f // people tilt the phone well down to look at stairs (60 = pointing at the desk)
     var staticRepeatMs = 15000L // same label, same direction: don't re-announce within this
     var waistMinM = 0.45f // waist-height obstacles (tables, counters)
     var waistMaxM = 1.2f
@@ -222,6 +237,11 @@ object Settings {
 
 @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** On screen now: quick launch then leaves volume down to the app. */
+        @Volatile var visible = false
+    }
+
     private lateinit var preview: View // TextureView (Camera2 logical camera) or PreviewView (CameraX fallback)
     private var wideId: String? = null
     private var wide: WideCamera? = null
@@ -258,6 +278,8 @@ class MainActivity : ComponentActivity() {
     private var depthFrames = 0
     @Volatile private var calibration: Calibration? = null
     @Volatile private var straight: StraightLine? = null
+    @Volatile private var sceneFinder: SceneFinder? = null
+    private val translator = AnswerTranslator()
     private val bus = BusReader() // analysis thread only
     private val busOcr by lazy { com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS) }
     private val sms by lazy { EmergencySms(this) }
@@ -288,7 +310,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var latestTracks = emptyList<Track>()
     @Volatile private var latestHazards = Hazards()
     private lateinit var voice: VoiceInput
-    private lateinit var gemma: Vlm // Qwen3-VL (llama.cpp) or Gemma 4 (LiteRT-LM)
+    private lateinit var gemma: Vlm // HybridVlm: cloud when online (Auto), else Qwen3-VL / Gemma on the phone
     private lateinit var sounds: SoundWatch
     private lateinit var emergency: Emergency
     @Volatile private var finder: Finder? = null
@@ -298,7 +320,7 @@ class MainActivity : ComponentActivity() {
     private val emergencyHold = Runnable { startEmergency() }
     @Volatile private var latestFrame: Bitmap? = null
     private var camera: Camera? = null
-    private var torchOn = false
+    private val torch = TorchPolicy() // analysis thread only
     private var frameCount = 0
     private val heat = ThermalGovernor() // analysis thread only
     private var headroom = Float.NaN
@@ -334,6 +356,10 @@ class MainActivity : ComponentActivity() {
             addContact = { pickContact.launch(Intent(Intent.ACTION_PICK, android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI)) },
             removeContact = { i -> Prefs.contacts = Prefs.contacts.filterIndexed { k, _ -> k != i }; Prefs.save(this) },
             testSms = { feedback.say(sms.alert("", test = true)) },
+            route = { (gemma as? HybridVlm)?.snapshot() },
+            languageChanged = { translator.prepare(Prefs.speechLang) },
+            openAccessibility = { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+            quickLaunchOn = { quickLaunchEnabled() },
         ))
         if (Prefs.calibrated) depthAnalyzer.restore(Prefs.depthScale)
         setContentView(screen.root)
@@ -351,7 +377,8 @@ class MainActivity : ComponentActivity() {
             if (it[CAMERA] == true) startCamera() else screen.cameraError("Camera permission is off.")
         }
             .launch(arrayOf(CAMERA, ACTIVITY_RECOGNITION, RECORD_AUDIO))
-        gemma = (Qwen(this).takeIf { Settings.useQwen && it.installed } ?: Gemma(this)).also { it.load() }
+        val local = Qwen(this).takeIf { Settings.useQwen && it.installed } ?: Gemma(this)
+        gemma = HybridVlm(local, CloudVlm(), this) { heat.tier }.also { it.load() }
         emergency = Emergency(this)
         sounds = SoundWatch(this, paused = { voice.listening || emergency.active }) { d -> runOnUiThread { heard(d) } }
         feedback.listening = { voice.listening }
@@ -433,15 +460,21 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ego.start()
+        visible = true
         screen.resumed()
+        translator.prepare(Prefs.speechLang)
         pressure?.let { sensors.registerListener(baroListener, it, android.hardware.SensorManager.SENSOR_DELAY_NORMAL) }
         if (wide != null && checkSelfPermission(CAMERA) == PERMISSION_GRANTED) wide?.start()
         if (checkSelfPermission(RECORD_AUDIO) == PERMISSION_GRANTED) sounds.start()
     }
 
-    override fun onDestroy() { (gemma as? Qwen)?.stop(); super.onDestroy() }
+    override fun onDestroy() { ((gemma as? HybridVlm)?.local as? Qwen)?.stop(); super.onDestroy() }
 
-    override fun onPause() { ego.stop(); sensors.unregisterListener(baroListener); sounds.stop(); wide?.stop(); super.onPause() }
+    override fun onPause() {
+        visible = false
+        // The camera closes: torch off and forgotten, so it can't come back on by itself on return.
+        analysisThread.execute { torch.reset() }; setTorch(false)
+        ego.stop(); sensors.unregisterListener(baroListener); sounds.stop(); wide?.stop(); super.onPause() }
 
     /**
      * Logical camera (main + ultra-wide in one session) when the phone has one; CameraX otherwise.
@@ -521,6 +554,48 @@ class MainActivity : ComponentActivity() {
         if (emergency.active) { emergency.stop(); feedback.say("Alarm stopped."); return true }
         singlePress(keyCode, event)
         return true
+    }
+
+    /** Is the quick-launch accessibility service switched on (by the user, in Android settings)? */
+    private fun quickLaunchEnabled(): Boolean {
+        val on = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+        return on.split(':').any { it.equals("$packageName/${QuickLaunchService::class.java.name}", true) || it.equals("$packageName/.QuickLaunchService", true) }
+    }
+
+    /** Qwen looks for a door / exit / anything YOLO can't name while the user turns; two agreeing looks to announce. */
+    private fun sceneFind(now: Long, frame: Bitmap) {
+        val f = sceneFinder ?: return
+        if (f.asking || !gemma.ready || voice.listening || now - f.lastAskMs < Settings.sceneFindMs) return
+        f.asking = true; f.lastAskMs = now
+        gemma.ask(f.prompt(), frame) { reply ->
+            f.asking = false
+            val (words, done) = f.answer(SystemClock.elapsedRealtime(), reply)
+            if (done && sceneFinder === f) sceneFinder = null
+            words?.let { w -> runOnUiThread { feedback.answer(w); said = w } }
+        }
+    }
+
+    /**
+     * Lift buttons or a room number, read from positions on-device (no model guessing); Qwen only if OCR finds
+     * nothing. The sharp preview is grabbed here (UI thread), the reading happens on the analysis thread.
+     */
+    private fun readPanel(question: String) {
+        val img = (preview as? android.view.TextureView)?.takeIf { it.isAvailable }?.bitmap ?: latestFrame ?: run { feedback.answer("I can't see yet."); return }
+        feedback.say("Reading.")
+        analysisThread.execute {
+            val words = runCatching {
+                com.google.android.gms.tasks.Tasks.await(busOcr.process(com.google.mlkit.vision.common.InputImage.fromBitmap(img, 0)))
+                    .textBlocks.flatMap { b -> b.lines.flatMap { l -> l.elements } }
+                    .mapNotNull { e -> e.boundingBox?.let { r -> Word(e.text, r.left, r.top, r.height()) } }
+            }.getOrDefault(emptyList())
+            val room = Panel.isRoomQuestion(question)
+            val result = if (room) Panel.roomNumber(words) else Panel.liftButtons(words) ?: Panel.roomNumber(words)
+            if (result != null) { runOnUiThread { speakAnswer(result) }; return@execute }
+            val ask = if (room) "Read the room or door number on the sign. Answer only the number, or: no number." else
+                "This is a lift panel or display. Read the floor numbers on the buttons from top to bottom, the floor shown on the display, and which button is lit. Be brief."
+            if (gemma.ready) gemma.ask(ask, img) { a -> val w = a ?: "I couldn't read it. Move a little closer."; runOnUiThread { speakAnswer(w) } }
+            else runOnUiThread { feedback.answer("I couldn't read it. Move a little closer.") }
+        }
     }
 
     /** Walk straight: drift cues as vibration (one long = turn right, two short = turn left) plus a few words. */
@@ -667,11 +742,11 @@ class MainActivity : ComponentActivity() {
             Ask.FIND -> {
                 val (what, label) = findTarget(text)!!
                 if (label != null) { finder = Finder(label, SystemClock.elapsedRealtime()); "Looking for the $what. Turn slowly." }
-                else if (askGemma("Where is the $what? Answer with its clock direction and rough distance in metres, or say it is not visible.",
-                        fallback = "I can't see a $what.")) return
+                else if (gemma.ready) { sceneFinder = SceneFinder(what, SystemClock.elapsedRealtime()); "Looking for the $what. Turn slowly." }
                 else "I can only find everyday objects like chairs, people, bottles or bags."
             }
-            Ask.STOP -> { finder = null; straight = null; "Stopped." }
+            Ask.STOP -> { finder = null; straight = null; sceneFinder = null; "Stopped." }
+            Ask.PANEL -> { readPanel(text); return }
             Ask.STRAIGHT -> { straight = StraightLine(ego.headingDeg, SystemClock.elapsedRealtime()); "Keeping you straight. Walk." }
             Ask.SIT -> { analysisThread.execute { activity.force(Activity.SITTING, SystemClock.elapsedRealtime()) }; Activity.SITTING.spoken }
             Ask.VEHICLE -> { analysisThread.execute { activity.force(Activity.VEHICLE, SystemClock.elapsedRealtime()) }; Activity.VEHICLE.spoken }
@@ -705,13 +780,23 @@ class MainActivity : ComponentActivity() {
      * Sends a question plus the current camera frame to local Gemma. Returns false if Gemma isn't ready.
      * The answer is spoken only if it contains no movement green-light; otherwise [fallback] is.
      */
+    /**
+     * An answer in the user's language: the app's own sentences use the fixed Hindi / Telugu templates (in Feedback);
+     * anything else (a Qwen or cloud answer, a lift panel reading) is translated on the phone first.
+     */
+    private fun speakAnswer(text: String) {
+        said = text
+        if (Prefs.speechLang == SpeechLang.EN || Say.tr(text, Prefs.speechLang) != null) { feedback.answer(text); return }
+        translator.translate(text) { t -> runOnUiThread { feedback.answer(t); said = t } }
+    }
+
     private fun askGemma(prompt: String, fallback: String): Boolean {
         if (!gemma.ready) { Log.i(TAG, "gemma not ready: ${gemma.status}"); return false }
         feedback.say("Looking.")
         said = "Gemma is looking…"
         gemma.ask(prompt, gemmaImage()) { reply ->
-            val safe = reply?.takeIf { !SafetyGate.greenLight(it) } ?: fallback
-            runOnUiThread { feedback.answer(safe); said = "Gemma: $safe" }
+            val safe = reply?.takeIf { !SafetyGate.greenLight(it) } ?: fallback // checked in English, before translating
+            runOnUiThread { speakAnswer(safe) }
         }
         return true
     }
@@ -770,7 +855,8 @@ class MainActivity : ComponentActivity() {
             Activity.WALKING -> Settings.fpsWalking; Activity.STILL -> Settings.fpsStill
             Activity.SITTING -> Settings.fpsSitting; Activity.VEHICLE -> Settings.fpsVehicle
         }
-        if (now - lastTakenMs < 1000L * heat.tier.detectEvery / fps) return false
+        val slow = if (Settings.heatThrottle) heat.tier.detectEvery else 1
+        if (now - lastTakenMs < 1000L * slow / fps) return false
         lastTakenMs = now
         return true
     }
@@ -822,7 +908,8 @@ class MainActivity : ComponentActivity() {
         activity.update(t2, ego.lastStepMs, ego.vibration) // only throttles detection; not announced
         val depthOn = activity.current != Activity.VEHICLE && activity.current != Activity.SITTING // bus lurches fake drop-offs
         if (!depthOn) hazards = Hazards()
-        if (depthOn && depthFrames++ % maxOf(Settings.depthEvery, heat.tier.depthEvery) == 0 && health == Health.OK) {
+        val depthStride = if (Settings.heatThrottle) maxOf(Settings.depthEvery, heat.tier.depthEvery) else Settings.depthEvery
+        if (depthOn && depthFrames++ % depthStride == 0 && health == Health.OK) {
             val d0 = SystemClock.elapsedRealtime()
             // Drop-offs only matter while walking; at a desk the table top would be mistaken for the floor.
             val walking = activity.current == Activity.WALKING || calibration?.walking == true
@@ -842,8 +929,7 @@ class MainActivity : ComponentActivity() {
         val dropHaptic = dropNow?.haptic ?: app.nadaka.drop.DropHaptic.NONE
         dropOut = dropNow?.copy(transition = null, haptic = app.nadaka.drop.DropHaptic.NONE) // each event once
         tracks.forEach { it.depthM = depthAnalyzer.metresIn(it.box, it.label) }
-        if (health == Health.DARK && !torchOn) { torchOn = true; setTorch(true) }
-        else if (torchOn && luma > Settings.torchOffLuma) { torchOn = false; setTorch(false) }
+        torch.update(t2, luma)?.let(::setTorch)
         chooseLens(t2, tracks)
         memory.record(t2, hazards, tracks, health)
         latestTracks = tracks
@@ -857,16 +943,19 @@ class MainActivity : ComponentActivity() {
         if (!alarmOn && confirmed && (risingDrop || t2 - dropSaidMs >= Settings.hazardRepeatMs)) {
             dropSaidMs = t2
             val m = dropNow!!.dropAheadM
-            val words = if (m.isNaN()) "Stop. Drop ahead." else "Stop. Drop ahead, ${metres(m)}."
+            val n = dropNow.stairsDownSteps
+            val what = if (n >= 2) "Stairs down" else "Drop"
+            val words = (if (m.isNaN()) "Stop. $what ahead." else "Stop. $what ahead, ${metres(m)}.") + (if (n >= 2) " At least $n steps." else "")
             feedback.warn(words); said = words; saidLevel = Buzz.WARN
         }
         // Stairs going up: say it once, again every few seconds while it stays in view.
         dropNow?.stairsUpM?.takeIf { !it.isNaN() && !alarmOn && t2 - stairsSaidMs >= Settings.stairsRepeatMs }?.let {
             stairsSaidMs = t2
-            val words = "Stairs going up ahead, ${metres(it)}."
+            val n = dropNow.stairsUpSteps
+            val words = "Stairs going up ahead, ${metres(it)}." + (if (n >= 2) " About $n steps." else "")
             feedback.play(listOf(Alert(words, Buzz.WARN, Tacton.HEAD, "Stairs up."))); said = words; saidLevel = Buzz.WARN
         }
-        if (!alarmOn) { walkStraight(t2); readBus(t2, tracks) }
+        if (!alarmOn) { walkStraight(t2); readBus(t2, tracks); sceneFind(t2, frame) }
         policy.decide(tracks, health, t2, hazards.copy(dropAtM = null), activity.current).takeIf { it.isNotEmpty() && finder == null && !alarmOn }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
         if (!alarmOn) feedback.haptics.drop(dropHaptic) // after the alert batch so nothing overrides it; ignores sound settings
@@ -880,7 +969,7 @@ class MainActivity : ComponentActivity() {
         checkBattery(t2)
         pollHeat(t2)
         heat.update(t2, getSystemService(PowerManager::class.java).currentThermalStatus, headroom, batteryC,
-            SystemClock.elapsedRealtime() - t0)?.let { feedback.say(it.spoken, strong = it > HeatTier.WARM); said = it.spoken }
+            SystemClock.elapsedRealtime() - t0)?.let { if (it >= HeatTier.HOT) { feedback.say(it.spoken); said = it.spoken } } // only "hot", no chatter
 
         val fps = if (lastFrameMs == 0L) 0 else 1000 / (t2 - lastFrameMs).coerceAtLeast(1)
         lastFrameMs = t2
@@ -898,7 +987,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** Speech + vibration output. What to say is decided by AlertPolicy. */
-class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
+class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
     private val tts = TextToSpeech(ctx, this)
     val haptics = Haptics(ctx)
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
@@ -912,13 +1001,51 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     @Volatile var answering = false
         private set
 
-    init {
-        tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+    /** Shared by the English and the Hindi / Telugu voice: an answer finishing starts the quiet gap. */
+    private val progress = object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
             override fun onDone(id: String?) { if (id == ANSWER) answerEnded() }
             @Deprecated("") override fun onError(id: String?) { if (id == ANSWER) answerEnded() }
             override fun onStop(id: String?, interrupted: Boolean) { if (id == ANSWER) answerEnded() }
-        })
+        }
+
+    init {
+        tts.setOnUtteranceProgressListener(progress)
+    }
+
+    // Hindi / Telugu voice (the phone's own offline TTS voices), created when that language is chosen.
+    private var local: TextToSpeech? = null
+    private var localLang: SpeechLang? = null
+    @Volatile private var localReady = false
+
+    private fun ensureLocal(lang: SpeechLang) {
+        if (lang == localLang) return
+        local?.shutdown(); local = null; localReady = false; localLang = lang
+        if (lang == SpeechLang.EN) return
+        local = TextToSpeech(ctx) { st ->
+            val t = local ?: return@TextToSpeech
+            val r = if (st == TextToSpeech.SUCCESS) t.setLanguage(lang.locale) else TextToSpeech.LANG_NOT_SUPPORTED
+            localReady = r >= TextToSpeech.LANG_AVAILABLE
+            t.setOnUtteranceProgressListener(progress)
+            Log.i(TAG, "tts: ${lang.name} voice ${if (localReady) "ready" else "missing ($r)"}")
+            if (!localReady) tts.speak("The ${lang.name.lowercase().let { if (it == "hi") "Hindi" else "Telugu" }} voice is not installed. " +
+                "Install it in the phone's text to speech settings. Using English for now.", TextToSpeech.QUEUE_ADD, null, "lang")
+        }
+    }
+
+    /** All speech goes through here: translated alerts use the Hindi / Telugu voice; anything else English. */
+    private fun speak(text: String, mode: Int, params: android.os.Bundle?, id: String) {
+        val lang = Prefs.speechLang
+        ensureLocal(lang)
+        val out = if (lang == SpeechLang.EN) null else Say.tr(text, lang) ?: text.takeIf { Say.isIndic(it) }
+        val l = local
+        if (out != null && l != null && localReady) {
+            if (mode == TextToSpeech.QUEUE_FLUSH) tts.stop()
+            l.speak(out, mode, params, id)
+        } else {
+            if (mode == TextToSpeech.QUEUE_FLUSH) l?.stop()
+            tts.speak(text, mode, params, id)
+        }
     }
 
     override fun onInit(status: Int) {
@@ -936,23 +1063,23 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
 
     fun answer(text: String, strong: Boolean = false) {
         answering = true
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, ANSWER)
+        speak(text, TextToSpeech.QUEUE_FLUSH, null, ANSWER)
         if (strong) vibrator.vibrate(result)
     }
 
     fun buzz() = vibrator.vibrate(side)
 
     /** Must be heard whatever the Audio switch or an open mic says (fall, emergency). */
-    fun urgent(text: String) { answering = false; tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "urgent") }
+    fun urgent(text: String) { answering = false; speak(text, TextToSpeech.QUEUE_FLUSH, null, "urgent") }
 
     /** Danger that must be heard now: cuts off anything being said, including an answer. */
-    fun warn(text: String) { if (!Prefs.audioOn || listening()) return; answering = false; tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "warn") }
+    fun warn(text: String) { if (!Prefs.audioOn || listening()) return; answering = false; speak(text, TextToSpeech.QUEUE_FLUSH, null, "warn") }
 
     /** Settings > Test audio: always audible, whatever the Audio switch says. */
-    fun test() = tts.speak("Audio test. Stop. Drop ahead, 1 metre.", TextToSpeech.QUEUE_FLUSH, null, "test")
+    fun test() = speak("Audio test. Stop. Drop ahead, 1 metre.", TextToSpeech.QUEUE_FLUSH, null, "test")
 
     /** Stop talking before listening: the recognizer must not hear us. */
-    fun hush() { answering = false; tts.stop() }
+    fun hush() { answering = false; tts.stop(); local?.stop() }
 
     /** The microphone is open now: a crisp double tap (vibration, so it doesn't pollute the audio). */
     fun readyCue() = vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), intArrayOf(0, 255, 0, 255), -1))
@@ -960,14 +1087,14 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
     fun say(text: String, strong: Boolean = false) {
         if (!Prefs.audioOn || listening() || inGap) { if (strong && Prefs.hapticOn) vibrator.vibrate(result); return }
         // Never cut off an answer: queue behind it.
-        tts.speak(text, if (answering) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH, null, text)
+        speak(text, if (answering) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH, null, text)
         if (strong) vibrator.vibrate(result)
     }
 
     /** Plays each pattern with its meaning: speak, pause, vibrate. About 20 s. */
     fun lesson() {
         LESSON.forEachIndexed { i, (words, tacton) ->
-            main.postDelayed({ tts.speak(words, TextToSpeech.QUEUE_FLUSH, null, "lesson$i") }, i * 4500L)
+            main.postDelayed({ speak(words, TextToSpeech.QUEUE_FLUSH, null, "lesson$i") }, i * 4500L)
             main.postDelayed({ if (tacton == Tacton.TICK) repeat(4) { k -> main.postDelayed({ haptics.play(Tacton.TICK) }, k * 350L) } else haptics.play(tacton) }, i * 4500L + 2800)
         }
     }
@@ -978,20 +1105,20 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
         if (inGap) { // after an answer: feel routine alerts, hear only danger
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
             val danger = alerts.filter { it.buzz == Buzz.WARN }.map { it.short ?: it.text }
-            if (danger.isNotEmpty()) tts.speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger")
+            if (danger.isNotEmpty()) speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger")
             return
         }
         if (answering) {
             // The user is listening to an answer: feel routine alerts, hear only danger (it interrupts).
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
             val danger = alerts.filter { it.buzz == Buzz.WARN }.map { it.short ?: it.text }
-            if (danger.isNotEmpty()) { answering = false; tts.speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger") }
+            if (danger.isNotEmpty()) { answering = false; speak(danger.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "danger") }
             return
         }
         if (Settings.hapticsFirst) {
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
             val words = alerts.mapNotNull { it.short }
-            if (words.isNotEmpty()) tts.speak(words.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "short")
+            if (words.isNotEmpty()) speak(words.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "short")
             return
         }
         speakAll(alerts)
@@ -1003,7 +1130,7 @@ class Feedback(ctx: Context) : TextToSpeech.OnInitListener {
 
     /** Speech mode: full sentences, most urgent first; the strongest buzz of the batch. */
     private fun speakAll(alerts: List<Alert>) {
-        alerts.forEachIndexed { i, a -> tts.speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
+        alerts.forEachIndexed { i, a -> speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
         if (Prefs.hapticOn) vibrator.vibrate(
             when (alerts.maxOf { it.buzz.ordinal }) {
                 Buzz.WARN.ordinal -> result

@@ -43,7 +43,18 @@ val FIXED = setOf(
     "book", "laptop", "keyboard", "mouse", "remote", "bottle", "cup", "suitcase",
 )
 
-class Track(val id: Int, val label: String, var box: Box, var seenMs: Long) {
+class Track(val id: Int, firstLabel: String, var box: Box, var seenMs: Long) {
+    // Label stabiliser: the detector may call one object "chair" then "couch"; the track keeps both votes
+    // (weighted by confidence) and reports the most-voted label. Old votes fade so a real change wins.
+    private val votes = HashMap<String, Float>().apply { put(firstLabel, 1f) }
+    val label: String get() = votes.maxByOrNull { it.value }!!.key
+    val category get() = categoryOf(label)
+
+    fun vote(l: String, score: Float) {
+        for (k in votes.keys.toList()) votes[k] = votes.getValue(k) * 0.9f
+        votes[l] = (votes[l] ?: 0f) + score
+    }
+
     val heights = ArrayDeque<Pair<Long, Float>>()
     var growth = 0f            // 1/s, relative image growth ("looming")
     var ttc = Float.POSITIVE_INFINITY
@@ -101,7 +112,7 @@ class Tracker(private val model: EgoModel? = null) {
         val free = tracks.toMutableList()
         val seen = ArrayList<Track>()
         for (d in dets.sortedByDescending { it.score }) {
-            val match = free.filter { it.label == d.label }
+            val match = free.filter { it.category == categoryOf(d.label) } // same kind of thing, label may flicker
                 .maxByOrNull { iou(it.box.shifted(shift), d.box) }
                 ?.takeIf { iou(it.box.shifted(shift), d.box) >= Settings.trackIou }
             val t = match?.also { free.remove(it) } ?: Track(nextId++, d.label, d.box, now)
@@ -109,6 +120,7 @@ class Tracker(private val model: EgoModel? = null) {
                 val lateral = (d.box.centerX() - match.box.shifted(shift).centerX()) * Settings.hfovRad * t.metres / dt
                 if (!lateral.isNaN()) t.lateralMps = 0.7f * t.lateralMps + 0.3f * lateral
             }
+            if (match != null) t.vote(d.label, d.score)
             t.score = if (t.hits == 0) d.score else 0.7f * t.score + 0.3f * d.score
             t.box = d.box
             t.seenMs = now

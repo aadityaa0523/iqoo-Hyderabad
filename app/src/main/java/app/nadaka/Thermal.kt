@@ -5,11 +5,11 @@ package app.nadaka
  * phone warns later. The governor keeps the safety loop fast by shedding everything else first.
  */
 enum class HeatTier(val detectEvery: Int, val depthEvery: Int, val spoken: String) {
-    NOMINAL(1, 2, "Cooled down. Back to full speed."),
-    WARM(1, 3, "Phone is warm. Saving power, alerts slightly slower."),
-    HOT(2, 4, "Phone is hot. Essential alerts only."),
+    NOMINAL(1, 2, "Phone has cooled down."),
+    WARM(1, 3, "Phone is warm."),
+    HOT(2, 4, "Phone is hot."),
     // Safety floor: even at critical, detection every 3rd frame and depth every 6th never stop.
-    CRITICAL(3, 6, "Phone is very hot. Essential alerts only, please give it air."),
+    CRITICAL(3, 6, "Phone is very hot. Please give it some air."),
 }
 
 /**
