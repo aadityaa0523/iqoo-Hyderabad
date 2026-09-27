@@ -68,7 +68,8 @@ class Track(val id: Int, firstLabel: String, var box: Box, var seenMs: Long) {
     var hits = 0               // frames this object has been matched; flicker guard
     var score = 0f             // smoothed detector confidence
     var lateralMps = 0f        // sideways speed after removing my own turning
-    val moving get() = label !in FIXED && (objSpeed > Settings.movingMps || kotlin.math.abs(lateralMps) > Settings.movingMps)
+    // Toward OR away: someone walking away is moving, not a static object to announce.
+    val moving get() = label !in FIXED && (kotlin.math.abs(objSpeed) > Settings.movingMps || kotlin.math.abs(lateralMps) > Settings.movingMps)
 
     /** Half-visible at the left/right edge: direction and size are unreliable. */
     val edge get() = box.left <= 0.02f || box.right >= 0.98f

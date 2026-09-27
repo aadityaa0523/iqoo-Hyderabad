@@ -146,7 +146,9 @@ object Settings {
     var chatty = false // true = static objects at any distance, not just within staticRangeM
     var staticRangeM = 5f  // announce static objects within this range (once each)
     var staticPathDeg = 30f // ...and roughly ahead: things far to the side don't block the way
-    var movingRangeM = 10f // announce moving objects within this range
+    var movingRangeM = 10f // moving objects are shown on screen within this range
+    var movingAnnounceM = 6f // ...but only spoken when coming closer and within this range
+    var approachAnnounceM = 8f // "approaching" warnings beyond this are box jitter, not motion
     var movingRepeatMs = 12000L
     var pathHalfDeg = 20f // "in my path" = within this angle of straight ahead
 
@@ -186,6 +188,11 @@ object Settings {
     var fallStillG = 0.25f
     var fallTurnDeg = 45f        // and the phone ended up turned this much
     var fallCancelMs = 7000L
+    // Fall black box (BlackBox.kt): last seconds of small snapshots + motion, saved only when a fall happens
+    var blackBoxKeepMs = 10_000L
+    var blackBoxFrameMs = 500L
+    var blackBoxPx = 320
+    var blackBoxAfterMs = 3000L
     var dropHapticMs = 5000 // a confirmed drop-off vibrates this long
     var heatThrottle = false // heat is only shown (header, Diagnostics); set true to slow work down when hot
     var quickLaunchMs = 1500L // volume up x3 within this opens Nadaka from anywhere (QuickLaunch.kt)
@@ -280,6 +287,8 @@ class MainActivity : ComponentActivity() {
     @Volatile private var straight: StraightLine? = null
     @Volatile private var sceneFinder: SceneFinder? = null
     private val translator = AnswerTranslator()
+    private val blackBox by lazy { BlackBox(this) }
+    @Volatile private var fallAtMs = 0L
     private val bus = BusReader() // analysis thread only
     private val busOcr by lazy { com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS) }
     private val sms by lazy { EmergencySms(this) }
@@ -369,7 +378,10 @@ class MainActivity : ComponentActivity() {
             override fun handleOnBackPressed() { if (!screen.back()) finish() }
         })
         motionMissing = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) == null
-        ego = EgoMotion(this).also { it.onFall = { runOnUiThread(::fallDetected) } }
+        ego = EgoMotion(this).also {
+            it.onFall = { runOnUiThread(::fallDetected) }
+            it.onMotion = { t, g -> blackBox.motion(t, g) }
+        }
         egoLog = EgoLog(this)
 
         if (checkSelfPermission(CAMERA) == PERMISSION_GRANTED) startCamera()
@@ -658,6 +670,10 @@ class MainActivity : ComponentActivity() {
     private fun fallDetected() {
         if (fallPending || emergency.active) return
         fallPending = true
+        // Black box: save what happened before the fall, plus a few seconds after (whether or not the user is OK).
+        fallAtMs = SystemClock.elapsedRealtime()
+        val at = fallAtMs
+        main.postDelayed({ Thread { blackBox.save(at) }.start() }, Settings.blackBoxAfterMs)
         said = "FALL"
         feedback.urgent("Fall detected. If you are OK, press a volume key. Otherwise in 7 seconds I will sound an alarm and call your emergency contacts.")
         feedback.buzz()
@@ -891,6 +907,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         latestFrame = frame
+        blackBox.frame(t1, frame) // rolling memory of the last seconds, saved only if a fall happens
         val dets = detector.detect(frame, Settings.minScore)
         val t2 = SystemClock.elapsedRealtime()
         val motion = ego.snapshot()

@@ -162,7 +162,9 @@ class AlertPolicy {
         }
 
         // Approaching: my own walking already removed (ego-motion).
-        val coming = stable.filter { it.approaching }.minByOrNull { it.ttc / priorityOf(it.label) }
+        // Far away, a few pixels of box jitter look like motion: only trust "approaching" within approachAnnounceM.
+        val coming = stable.filter { it.approaching && (it.metres.isNaN() || it.metres <= Settings.approachAnnounceM) }
+            .minByOrNull { it.ttc / priorityOf(it.label) }
         if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
             lastApproachMs = now
             out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH, Tacton.APPROACH)
@@ -203,7 +205,10 @@ class AlertPolicy {
         }
 
         known.filter {
-            it.moving && it.sure && !it.edge && it.metres <= Settings.movingRangeM && !(crowd && it.label == "person") &&
+            // Only things getting CLOSER (own speed toward me, my walking removed), and near enough to matter.
+            // People walking away, across far ahead, or standing 9 m off were announced as "moving" before.
+            it.moving && it.objSpeed > Settings.movingMps && it.sure && !it.edge && it.metres <= Settings.movingAnnounceM &&
+                !(crowd && it.label == "person") &&
                 now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
         }.minByOrNull { urgency(it) }?.let {
             movingSaidMs[it.id] = now; lastInfoMs = now

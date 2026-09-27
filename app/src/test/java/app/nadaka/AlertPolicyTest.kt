@@ -56,14 +56,14 @@ class AlertPolicyTest {
         assertEquals(listOf("chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(track(4, metres = 1.2f)), 0))
     }
 
-    @Test fun movingWithinTenMetres() {
+    @Test fun movingOnlyWhenComingCloserAndNear() {
         val walker = { m: Float -> track(1, "person", cx = 0.8f, metres = m).also { it.objSpeed = 1f; it.approaching = false } }
-        assertEquals(listOf("person moving, 8 metres, 1 o'clock."), AlertPolicy().say(listOf(walker(8f)), 0))
-        assertEquals(emptyList<String>(), AlertPolicy().say(listOf(walker(12f)), 0))
+        assertEquals(listOf("person moving, 5 metres, 1 o'clock."), AlertPolicy().say(listOf(walker(5f)), 0))
+        assertEquals(emptyList<String>(), AlertPolicy().say(listOf(walker(8f)), 0)) // 8 m off: not spoken any more
         val p = AlertPolicy()
-        p.say(listOf(walker(8f)), 0)
-        assertEquals(0, p.say(listOf(walker(7f)), 3_000).size) // not every frame
-        assertEquals(1, p.say(listOf(walker(6f)), Settings.movingRepeatMs).size)
+        p.say(listOf(walker(5f)), 0)
+        assertEquals(0, p.say(listOf(walker(4.5f)), 3_000).size) // not every frame
+        assertEquals(1, p.say(listOf(walker(4f)), Settings.movingRepeatMs).size)
     }
 
     @Test fun standingTellsStaticThingsOnceButNeverNags() {

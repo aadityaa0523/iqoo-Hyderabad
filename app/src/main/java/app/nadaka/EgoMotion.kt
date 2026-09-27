@@ -33,6 +33,8 @@ class EgoMotion(ctx: Context) : SensorEventListener {
     private val fall = FallDetector()
     /** Called on the sensor thread when a fall is detected. */
     var onFall: () -> Unit = {}
+    /** Every accelerometer sample (time, g) for the fall black box. */
+    var onMotion: (Long, Float) -> Unit = { _, _ -> }
 
     fun start() {
         sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
@@ -60,7 +62,11 @@ class EgoMotion(ctx: Context) : SensorEventListener {
                 SensorManager.getOrientation(remap, orient)
                 headingDeg = Math.toDegrees(orient[0].toDouble()).toFloat()
             }
-            Sensor.TYPE_ACCELEROMETER -> if (fall.update(SystemClock.elapsedRealtime(), e.values[0], e.values[1], e.values[2])) onFall()
+            Sensor.TYPE_ACCELEROMETER -> {
+                val now = SystemClock.elapsedRealtime()
+                onMotion(now, kotlin.math.sqrt(e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]) / 9.81f)
+                if (fall.update(now, e.values[0], e.values[1], e.values[2])) onFall()
+            }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 val m2 = e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]
                 vibration += 0.05f * (m2 - vibration)
