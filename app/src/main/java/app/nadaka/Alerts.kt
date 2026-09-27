@@ -86,6 +86,10 @@ private fun name(t: Track) = displayName(t.label)
 
 fun inPath(t: Track, halfDeg: Float = Settings.pathHalfDeg) = Math.toDegrees(kotlin.math.abs(t.bearing).toDouble()) < halfDeg
 
+/** Something you could walk into: worth announcing unasked. Small objects are found by voice instead. */
+fun walkInto(t: Track) = categoryOf(t.label) != Category.OTHER ||
+    t.label in setOf("fire hydrant", "stop sign", "parking meter", "potted plant", "suitcase", "traffic light", "umbrella")
+
 /** "2.5 metres", "1 metre", "very close"; "" when unknown. */
 fun metres(m: Float): String {
     if (m.isNaN()) return ""
@@ -115,6 +119,7 @@ class AlertPolicy {
     private var lastInfoMs = -1_000_000L
     private var lastApproachMs = -1_000_000L
     private var lastCloseMs = -1_000_000L
+    private var lastObjectMs = -1_000_000L // any object announcement: approaching, close, moving, static
     private var lastDropMs = -1_000_000L
     private var lastOverheadMs = -1_000_000L
     private var lastCrowdMs = -1_000_000L
@@ -165,8 +170,10 @@ class AlertPolicy {
         // Far away, a few pixels of box jitter look like motion: only trust "approaching" within approachAnnounceM.
         val coming = stable.filter { it.approaching && (it.metres.isNaN() || it.metres <= Settings.approachAnnounceM) }
             .minByOrNull { it.ttc / priorityOf(it.label) }
-        if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs) {
-            lastApproachMs = now
+        val urgent = { t: Track -> t.metres < Settings.veryCloseM || t.ttc < Settings.urgentTtcS }
+        val gapOk = now - lastObjectMs >= Settings.objectGapMs
+        if (coming != null && now - lastApproachMs >= Settings.approachCooldownMs && (gapOk || urgent(coming))) {
+            lastApproachMs = now; lastObjectMs = now
             out += Alert(phrase("${name(coming)} approaching", metres(coming.metres), clock(coming.bearing)), Buzz.APPROACH, Tacton.APPROACH)
         }
 
@@ -177,8 +184,8 @@ class AlertPolicy {
                 // Unsure or half-visible objects only when practically touching: silence beats a wrong alert.
                 (it.sure || it.metres < Settings.veryCloseM)
         }.minByOrNull { urgency(it) }
-        if (close != null && now - lastCloseMs >= Settings.closeRepeatMs) {
-            lastCloseMs = now
+        if (close != null && out.isEmpty() && now - lastCloseMs >= Settings.closeRepeatMs && (gapOk || urgent(close))) {
+            lastCloseMs = now; lastObjectMs = now
             spokenHeight[close.id] = close.box.height()
             val what = if (close.metres < Settings.veryCloseM) name(close) else "${name(close)} close"
             out += Alert(phrase(what, metres(close.metres), clock(close.bearing)), Buzz.AHEAD)
@@ -196,7 +203,7 @@ class AlertPolicy {
         if (out.isNotEmpty()) return out.take(Settings.maxAlerts)
 
         // Awareness, one message at a time: moving things within 10 m, static things within 5 m.
-        if (sitting || now - lastInfoMs < Settings.speechGapMs) return out
+        if (sitting || now - lastInfoMs < Settings.speechGapMs || now - lastObjectMs < Settings.objectGapMs) return out
         val known = stable.filter { !it.metres.isNaN() }
         val crowd = known.count { it.label == "person" && it.metres <= Settings.movingRangeM } >= Settings.crowdCount
         if (crowd && now - lastCrowdMs > Settings.crowdRepeatMs) {
@@ -211,7 +218,7 @@ class AlertPolicy {
                 !(crowd && it.label == "person") &&
                 now - (movingSaidMs[it.id] ?: -1_000_000L) >= Settings.movingRepeatMs
         }.minByOrNull { urgency(it) }?.let {
-            movingSaidMs[it.id] = now; lastInfoMs = now
+            movingSaidMs[it.id] = now; lastInfoMs = now; lastObjectMs = now
             val words = phrase("${name(it)} moving", metres(it.metres), clock(it.bearing))
             return listOf(Alert(words, Buzz.SIDE, short = words))
         }
@@ -220,12 +227,13 @@ class AlertPolicy {
         val range = if (Settings.chatty) Float.MAX_VALUE else Settings.staticRangeM
         val t = known.filter {
             it.sure && !it.moving && !it.edge && it.metres <= range && inPath(it, Settings.staticPathDeg) && !(crowd && it.label == "person") &&
+                walkInto(it) && // bottles, cups, books, phones: findable by voice, not announced
                 spokenHeight[it.id].let { said -> said == null || it.box.height() >= said * Settings.habituationGrowth } &&
                 now - (staticSaidMs["${it.label}@${clock(it.bearing)}"] ?: -1_000_000L) >= Settings.staticRepeatMs
         }.minByOrNull { urgency(it) } ?: return out
         spokenHeight[t.id] = t.box.height()
         staticSaidMs["${t.label}@${clock(t.bearing)}"] = now
-        lastInfoMs = now
+        lastInfoMs = now; lastObjectMs = now
         val c = clock(t.bearing)
         val words = phrase(name(t).replaceFirstChar { it.uppercase() }, metres(t.metres), c)
         return listOf(Alert(words, if (c == "12 o'clock") Buzz.AHEAD else Buzz.SIDE, short = words))

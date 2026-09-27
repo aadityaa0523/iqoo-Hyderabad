@@ -144,7 +144,7 @@ object Settings {
     var tickMs = 45L // long enough to feel on the chest
     var hapticGain = 1.0f // one knob for overall strength if the user finds it weak/strong
     var chatty = false // true = static objects at any distance, not just within staticRangeM
-    var staticRangeM = 5f  // announce static objects within this range (once each)
+    var staticRangeM = 3f  // announce static objects within this range, in the path (once each)
     var staticPathDeg = 30f // ...and roughly ahead: things far to the side don't block the way
     var movingRangeM = 10f // moving objects are shown on screen within this range
     var movingAnnounceM = 6f // ...but only spoken when coming closer and within this range
@@ -158,7 +158,9 @@ object Settings {
     var activityGraceMs = 10000L
 
     // Speech (Alerts.kt)
-    var maxAlerts = 2 // e.g. "person approaching" AND "chair close" in the same breath
+    var maxAlerts = 1 // one thing at a time: the most dangerous or closest
+    var objectGapMs = 4000L // at least this long between any two object announcements (urgent ones excepted)
+    var urgentTtcS = 2f // coming at me this soon: speak even inside the gap
     var closeM = 1.5f
     var closeRepeatMs = 4000L
     var veryCloseM = 0.75f
