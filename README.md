@@ -56,7 +56,17 @@ that it is safe to move: it reports what it measured, and the cane stays in char
 29. [Layer 10: Interface and accessibility](#29-layer-10-interface-and-accessibility)
 30. [Layer 11: Platform, performance and heat](#30-layer-11-platform-performance-and-heat)
 
-**Part V — Performance** · **Part VI — Verification** · **Part VII — Safety, privacy, limits** · **Part VIII — Build**
+**Part V — Performance** · **Part VI — Verification**
+
+**Part VII — Edge cases and future risk reduction**
+
+31. [Sensing](#31-layer-0-sensing) · 32. [Perception](#32-layer-1-perception) · 33. [Tracking](#33-layer-2-tracking-and-ego-motion) ·
+34. [Geometry and calibration](#34-layer-3-metric-geometry-and-calibration) · 35. [Hazards](#35-layer-4-hazard-detection) ·
+36. [Decision](#36-layer-5-decision-and-alert-policy) · 37. [Feedback](#37-layer-6-feedback) · 38. [Assistant](#38-layer-7-assistant) ·
+39. [Emergency](#39-layer-8-emergency) · 40. [Mobility](#40-layer-9-mobility-aids) · 41. [Interface](#41-layer-10-interface-and-accessibility) ·
+42. [Platform](#42-layer-11-platform-performance-and-heat) · [Roadmap](#future-scope-roadmap-to-reduce-the-remaining-risk)
+
+**Part VIII — Safety, privacy, limits** · **Part IX — Build**
 
 ---
 
@@ -1031,7 +1041,217 @@ Field verification uses the Diagnostics screen and the drop-off CSV log.
 
 ---
 
-# Part VII — Safety, privacy and known limits
+# Part VII — Edge cases, mitigations and future risk reduction
+
+Every layer has failure modes. For each one: what would go wrong, how Nadaka handles it today, what risk remains, and
+how that risk can be reduced further. "Remaining risk" is stated honestly; the cane is the final safeguard in all of
+them.
+
+## 31. Layer 0: Sensing
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Camera covered by a hand, pocket or clothing | Detections from a black frame; false "clear" | Mean luminance < 20 with near-zero Laplacian variance → CAN'T SEE after 1 s, spoken and vibrated; hazards suppressed | A partly covered lens may still pass | Detect a static region across frames (occlusion mask); per-quadrant brightness check |
+| Darkness at night | Detector and depth fail silently | Luminance < 35 → torch policy switches the torch on after 1 s; CAN'T SEE if still unusable | Torch range is ~2–3 m; far objects stay invisible | Longer exposure / night-mode capture request; low-light enhancement before detection |
+| Sudden light change (entering a building, headlights) | Over- or under-exposed frames for a moment | Health state must persist 1 s before being announced; tracks need 5 hits, so a few bad frames change nothing | Auto-exposure takes ~0.5 s to settle | Read exposure metadata and skip frames during convergence |
+| Motion blur while walking fast | Weak edges, missed detections | Blur (Laplacian variance < 15) → "hold steady"; drop pipeline treats severe blur as "path not traversable", never as a drop | Moderate blur reduces recall silently | Request a shorter exposure / higher ISO when steps are frequent; gyro-based frame selection (keep the sharpest of several) |
+| Rain or water drops on the lens | Smeared image, false edges | Blur and health checks; drop-offs need depth agreement, so a smear alone cannot confirm | Drops can create local false edges | Lens-contamination detector (persistent blurred blob); voice prompt to wipe the lens |
+| Phone tilted too far up or down | Floor not in view; geometry invalid | Pitch outside the usable range → TILTED; depth hazards only within −5°…55° pitch; calibration coaches the tilt | A loosely held phone drifts | Periodic tilt reminders; lanyard / clip mounting guide |
+| Phone rotated sideways (roll) | Boxes and bearings rotated | Roll beyond the limit → TILTED | None significant | Roll-compensated analysis for mild tilts |
+| Camera fails to open or stops delivering frames | Silent loss of all safety | Open failure → CAMERA OFF screen and voice; a 4 s watchdog on frames shows CAMERA OFF | Background restrictions can pause the camera | Foreground service keeping the camera alive with a persistent notification |
+| Camera permission denied | No perception at all | CAMERA OFF with the reason "camera permission is off" | User must grant it | Guided spoken permission flow |
+| Frames arrive while the previous one is still processing | Queue builds up, latency grows | Busy flag: frames are dropped, never queued; the frame gate runs before conversion | None | — |
+| Step detector latency or missed steps | Wrong walking speed | Calibration measures the sensor's miss rate over 13 known steps and corrects stride (factor 0.5–2) | Different shoes / pace after calibration | Continuous self-calibration from optical flow; periodic re-calibration prompt |
+| No accelerometer / motion sensor | No pitch, no falls | SENSOR OFF state with "drop alerts are off, use your cane" | — | — |
+| No barometer (most phones) | No descent evidence | Barometer is optional; the drop pipeline confirms from vision + depth alone | Descending stairs gain no extra confirmation | Use it automatically on phones that have one (already supported) |
+| Gyroscope drift over long periods | Heading error in walk-straight | Game rotation vector (fused, no magnetometer) and a 90 s session limit | Slow drift over a long crossing | Re-lock on detected straight features (kerb lines, lane markings) |
+| Magnetic interference (metal, vehicles) | Compass errors | The heading source deliberately excludes the magnetometer | — | — |
+
+## 32. Layer 1: Perception
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Portrait frame fed to a square network | Objects distorted (33 % wider), wrong labels and sizes | Letterboxing with grey padding and exact box back-mapping | — | — |
+| One-frame ghost detection (a door frame read as a person) | A false alert | Tracks need 5 matched frames before speech; per-class confidence; unsure objects silent | A stable misdetection over many frames | Temporal re-verification with the vision-language model for rare classes |
+| Label flicker (chair / couch / bench) | Track restarts; object never spoken | Matching by category + confidence-weighted label votes with decay | — | — |
+| The same object detected as two classes | Duplicate alerts | Cross-class suppression at IoU > 0.7, keeping score × priority | — | — |
+| Classes that misfire indoors (bed, TV, fridge) | False obstacles at home or office | Higher per-class confidence (0.55–0.6) | Some misfires remain | Fine-tune on indoor footage from the target users |
+| Irrelevant classes (cutlery, fruit, toothbrush) | Noise in alerts and lists | 27 classes dropped at the detector | — | — |
+| Objects not in the 80 classes (door, pole, pothole, speed breaker, auto-rickshaw) | Not named | Depth hazards (floor obstacle, waist, head height, drop-off, blocked) cover the physical danger; the vision-language model finds doors and exits on request | Named alerts missing for auto-rickshaws and poles | Retrain the detector on Indian street data with extra classes (autorickshaw, pothole, speed breaker, open drain, pole) |
+| Very small or distant objects | Missed detections | Irrelevant for immediate safety (alerts are within 1.5–8 m) | Early warning for fast vehicles is limited | Higher input resolution or a tiled detection pass for the upper frame |
+| Crowds with overlapping people | Many overlapping boxes, spoken repeatedly | NMS; a crowd (4+ people within 10 m) is announced once as "crowd ahead" | Individuals inside the crowd are not tracked reliably | Crowd density estimation and a "follow the gap" hint |
+| Depth model on a blank wall or plain floor | Nearly uniform output, no gradient | Featureless view with no trusted depth → "path not traversable" (never a drop); floor ruler requires a flat, consistent floor | — | — |
+| Depth through glass or into mirrors | Glass door reads as open space | Stated limitation; the drop pipeline's reflection guard prevents false stops on mirror-like floors | Glass doors and walls are not warned about | Dedicated glass segmentation model; specular-highlight and frame detection; ultrasonic accessory |
+| Relative depth scale changes from scene to scene | Wrong metres | Floor ruler relearned while walking; drop test compares near and far side in the same frame; distances beyond 10 m discarded | Distances are approximate before calibration | Metric depth model fine-tuned for indoor and outdoor scenes |
+| NPU unavailable or a model fails to compile | No perception | Automatic fallback HTP → GPU → CPU; the backend is shown in Diagnostics | CPU is 10–20× slower | — |
+| First launch slow (NPU graph compilation) | Delayed start | Graph cache token: later launches load in ~0.15 s; STARTING screen during load | First install takes several seconds | Ship pre-compiled context binaries |
+
+## 33. Layer 2: Tracking and ego-motion
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| User turns the body | All boxes shift; tracks break | Gyroscope yaw shift applied to old boxes before matching | Fast spins exceed the match window | Feature-based re-identification after large turns |
+| Walking toward a parked car | Reported as "approaching" | Own speed × cos(bearing) subtracted from closing speed; furniture never approaches | Stride errors bias the subtraction | Calibrated stride (done); optical-flow ego-speed |
+| Object moving away | Reported as a static object | Moving = own speed in either direction or lateral speed > 0.6 m/s; only objects coming closer within 6 m are spoken | — | — |
+| Far objects (9 m+) with jittery boxes | False "moving" / "approaching" | Approaching only within 8 m; moving only within 6 m and when coming closer | Fast vehicles far away get late warnings | Longer-range tracking with Kalman filtering and radar-like velocity estimation |
+| Object partly out of frame | Size-based distance wrong ("person 36 m") | Size prior disabled for cut boxes and seated/partial people; depth distance used when calibrated; else "unknown" | — | — |
+| Occlusion (a person walks behind a pillar) | Track lost and restarted | 0.5 s grace window keeps tracks alive | Longer occlusions restart tracks | Motion-predicted track continuation |
+| Sitting or standing still | Constant alerts about nearby furniture | Activity detection: standing → closer range only; sitting → only things coming at the user; static objects once, again only if they loom 50 % larger | — | — |
+| Riding a bus or car | Vibrations and motion fake hazards | Vehicle activity (vibration without steps) → hazard alerts paused, camera health only; voice override "I'm on a bus" | Smooth metro rides may look like standing | Vehicle detection from GPS speed |
+| Learned classifier not available | No model-based approach detection | Falls back to the explicit rule (own speed > 0.7 m/s and τ < 3 s) | — | More labelled walks to retrain |
+
+## 34. Layer 3: Metric geometry and calibration
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| A table top taken as the floor | Wrong ruler, wrong distances everywhere | Ruler learned only while walking, from a flat surface agreeing over 5 frames; every frame must match the ground under the feet within 1.6× | — | — |
+| Phone re-mounted at a different height | Stale ruler | 20 consecutive disagreeing flat-floor frames → relearn | Until then distances are off | Detect mounting changes from gravity and prompt re-calibration |
+| User skips the height step | Default camera height 1.3 m | Calibration keeps the default and still locks the ruler from walking | Distances biased by the height error | Estimate height from the floor ruler and step length |
+| Calibration done on a slope, carpet or in low light | A poor ruler saved permanently | Ruler must lock during the walks; otherwise "try again on a flat floor in good light" | A marginal lock can pass | Reject calibrations with high ruler variance; re-verify at the next walk |
+| Steps not counted exactly (user walks 12 instead of 10) | Wrong stride correction | Correction clamped to 0.5–2; stride also depends on height | Small speed bias | Average over several walks |
+| Lens field of view unknown | Angles wrong by ~10 % | Read from focal length and sensor size during calibration; plausibility bounds | Distortion near the frame edges | Full intrinsic calibration with lens distortion coefficients |
+| Distances beyond 10 m | Extrapolated nonsense | Reported as unknown | — | Metric depth model |
+| Stairs or slope under the feet | Floor model assumes flatness | Floor flatness check; the ruler is not learned from non-flat samples | Distances on slopes are approximate | Fit a local ground plane instead of assuming a flat floor |
+
+## 35. Layer 4: Hazard detection
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Shadow line across the floor | False drop-off | Depth shows the floor continuing → CONTRADICTS; edge alone is never evidence | — | — |
+| Painted line, tile grout, rug edge, doormat, threshold | False drop-off | Same depth contradiction; ground plane shows no break; tested scenes stay SAFE | — | — |
+| Shiny floor or puddle reflecting the ceiling | Deep "hole" → false STOP | Reflection guard: > 1.2 m apparent depth + same-looking floor or bright mirror image → capped at POSSIBLE | A real deep drop onto an identical-looking surface is also capped | Polarisation-free cues: reflection motion parallax against ego-motion |
+| Furniture edge (table, bench) looks like a step | False drop-off | Object suppression lowers confidence; near side must be the user's floor (±35 %); tables measured as waist obstacles instead | — | — |
+| Real kerb (15 cm) | Missed | Tested: kerbs confirm through edge + depth jump ≥ 8 % + ground break | Very shallow kerbs (< 8 cm) | Higher-resolution depth around the edge |
+| Standing still at the top of stairs | Stale depth → "unreliable" forever | Depth on every analysed frame; 450 ms age limit | — | — |
+| Pointing the phone steeply down at stairs | Floor ruler rejected | Depth hazards up to 55° pitch | Beyond 55° the view is mostly the user's feet | — |
+| Stairs going down seen from far away | Lower steps hidden behind the top edge | Warned as a drop; step count "at least N" once within ~1.5 m | Exact count from far away is impossible optically | — |
+| Stairs going up read as a wall | "Blocked ahead" instead of "stairs up" | Height-profile slope 0.35–1.3 with ≥ 30 cm rise → STAIRS UP; blocked warning suppressed | Very steep ladders read as walls | — |
+| Ramps | Called stairs | Slope below 0.35 is not stairs | — | Explicit ramp announcement |
+| Escalators and moving walkways | Treated as stairs or floor | Not specifically handled | Moving steps are not announced as moving | Detect periodic motion of step edges |
+| Open drains and potholes | A narrow gap may not break the corridor median | Drop pipeline samples around each edge, not only the corridor median | Very narrow or covered drains | Retrain with Indian street data (drains, potholes, manholes) |
+| Overhanging branches, signboards, truck tailboards | Missed by the cane | Head-height rule: near point at 1.2–2.1 m with free space below, 4 consecutive depth frames | Thin branches below depth resolution | Higher-resolution depth band at head height |
+| Table tops and counters with open space underneath | "Path clear" | Waist-height rule (0.45–1.2 m within 1.5 m), walking and standing | — | — |
+| Something fills the whole view (chair back, wall at 30 cm) | Detector sees nothing | "Blocked ahead" from depth (centre and bottom at the same disparity); requires fresh depth | Very close objects below the depth model's range | Proximity sensor fusion at very short range |
+| Rapid state flicker | Nagging alerts | State machine hysteresis: 2/3 to possible, 3/5 strong to confirm, 8 clean to recover; repeat limits | — | — |
+| Camera blocked in the middle of a stair warning | Warning disappears silently | SENSOR_BLOCKED overrides and is announced; history cleared | — | — |
+
+## 36. Layer 5: Decision and alert policy
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Many objects at once | Information overload | At most a few alerts per decision; priority × distance ordering; crowd grouping | — | — |
+| Same object announced every frame | Nagging | Per-object and per-direction repeat limits (3.5–15 s); static objects once unless they loom | — | — |
+| User asks "is it safe to cross?" | A language model says "yes" | Safety questions answered only from detections; never-green-light filter on all spoken text, including Hindi and Telugu phrasing | — | — |
+| Alert while the user is asking a question | The recogniser hears the app | Nothing spoken while the microphone is open; vibration continues | — | — |
+| Alert during an answer | Answer cut off | Routine alerts queue; only danger interrupts; 3 s quiet gap after answers | — | — |
+| Fall emergency while other hazards are seen | Competing alerts | Alarm priority: routine alerts held back; emergency screen outranks all states | — | — |
+| Audio turned off by the user | Hazards not heard | Haptics independent of audio; TalkBack live region announces hazards | Both audio and haptics off leaves only the screen | Warn at switch-off (done in settings) |
+
+## 37. Layer 6: Feedback
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Loud street noise | Speech not heard | Vibration first; drop-off vibrations use the alarm channel | Very loud environments mask even short words | Bone-conduction headset support |
+| Phone on silent / do-not-disturb | Alerts muted | Haptics play regardless; drop-off vibration uses the alarm usage class; the siren uses the alarm stream at full volume | Media-stream speech follows the media volume | Route safety speech through the alarm stream |
+| Earphones connected | Siren only in the earphones | — | The siren may not reach passers-by | Force the siren to the phone speaker |
+| User forgets what a pattern means | Confusion | Spoken lesson of every pattern; patterns differ in rhythm, not only strength | — | Adaptive retraining when the user asks often |
+| Hindi or Telugu voice not installed | Garbled speech | Voice availability checked; English used with a spoken notice | — | Guided voice installation |
+| Sentence without a translation template | Mixed-language speech | All-or-nothing: untranslatable text is spoken fully in English | — | More templates |
+| Free-form answer in Hindi / Telugu from a small model | Broken grammar | The model always answers in English; on-device translation afterwards; translation pack checked offline | Machine translation phrasing | Larger on-device multilingual model when hardware allows |
+| Constant proximity ticks near a wall | Habituation, annoyance | Ticks only while the gap shrinks; stop after 1 s without progress | — | — |
+| Sound classifier false positives (TV sirens indoors) | False "siren nearby" | Confirmation over consecutive windows; rate limit per kind; paused in vehicles | Media sounds can still trigger | Direction and distance estimation from stereo microphones |
+
+## 38. Layer 7: Assistant
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Recogniser mishears a command | Wrong action | Every alternative transcript checked; normalisation of common slips; safety intent wins in any alternative | Uncommon phrasings fall to "help" | More phrasings; on-device intent classifier |
+| Speech pack missing / recogniser unavailable | Voice questions fail | Fallback to the system recogniser and a download prompt; "voice questions not available" otherwise | — | — |
+| The vision-language model hallucinates | Wrong description | Short answers, no distances, main object only; safety filter; hazards never come from it | Misidentified products | Cross-check product names with OCR text |
+| Model server crashes | Questions stop working | Watchdog restarts it up to 3 times in a row; answers fall back to built-in text | Repeated crashes after 3 attempts | Restart on the next question |
+| Model files missing | No on-device answers | Gemma fallback, then built-in answers | — | In-app model download |
+| Cloud busy (HTTP 429) or slow | Long waits | Automatic on-device answer for the same question; cloud paused 60 s after two failures | Free cloud tiers are often busy | Paid tier or self-hosted endpoint |
+| Offline | Cloud unusable | Detected from the network state; on-device path | — | — |
+| App in the background | Requests to the model stall | Questions are asked from the foreground app | — | — |
+| Door finder imagines a door | False guidance | Two consecutive answers must agree on the side; 30 s limit | Consistent hallucination | Confirm with depth (a door is a vertical plane with an opening) |
+| Bus board unreadable (LED, Telugu-only, far) | No number | Bus must fill ≥ 12 % of the frame; 6 attempts; two agreeing reads; one vision-model attempt | LED boards and Telugu-only numbers | Telugu OCR; LED-specific preprocessing |
+| Number plate read as a route | Wrong bus announced | Route regex rejects plate patterns (letters adjacent, leading zero, 4-digit runs) | — | — |
+| Note or medicine partially visible | Wrong value | Coaching ("move closer", "turn it over"); same answer twice before speaking | Worn or folded notes | Dedicated note classifier as a second opinion (training kit included) |
+| Medicine with unusual expiry format | Expiry missed | Several formats parsed; nothing spoken if not found | Rare formats | More formats |
+
+## 39. Layer 8: Emergency
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Phone dropped (not the user) | False fall alarm | Needs ≥ 0.5 m free fall + impact + stillness + orientation change; 7 s voice window to cancel with any volume key | A phone dropped from chest height meets all four | Camera cue: a fall of the user shows the ground approaching and a tilted horizon |
+| Sitting down hard, jumping, stumbling | False alarm | Rejected by the free-fall height, the stillness and orientation checks (tested) | — | — |
+| Slow slide to the floor, fall from sitting | Missed | Not detected (no free-fall phase) | Real risk for elderly users | Impact-plus-long-stillness detection with a longer confirmation window |
+| User unconscious | No cancellation | Siren and SMS start automatically after 7 s | — | — |
+| No emergency contacts set | Nobody notified | Spoken "no emergency contacts are set" | — | Prompt during first run |
+| SMS permission denied / no SIM | Message not sent | Spoken reason | — | — |
+| No GPS fix indoors | No location | Last known position with its age; a fresh fix sent when available | Stale position | Wi-Fi / cell location as a fallback |
+| Siren silenced accidentally | Help not attracted | Any volume key stops it (easy for helpers) | A pocket press can stop it | Require a 2 s hold to stop |
+| App closed or screen off | No fall detection | Detection runs while the app is active | Real gap | Foreground service keeping sensors and siren alive |
+| Black box after a fall with the camera covered | Dark frames | Motion trace is still saved | — | — |
+| Black box privacy | Images of bystanders | In memory only; saved locally only after a fall; never uploaded | Saved images stay on the phone | Blur faces before saving |
+
+## 40. Layer 9: Mobility aids
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Deliberate turn during walk-straight | Constant "drifting" cues | A turn > 60° held for 2 s re-locks the heading | — | — |
+| Heading wraps around north | 3° → 349° read as a 346° drift | Angles wrapped to (−180°, 180°] | — | — |
+| Small wobble while walking | Nagging cues | 10° threshold, 1 s hold, 5° hysteresis band | — | — |
+| Torch measuring its own light | Never turns off | Torch switches off for 0.7 s every 8 s to measure the room | A brief dark moment every 8 s | Use exposure metadata instead of turning the torch off |
+| Returning to the app in daylight | Torch comes back on | Torch reset whenever the app pauses | — | — |
+| Phone's own shortcut on the same key | Quick launch opens the camera app | Quick launch uses volume up (the phone uses quick volume-down presses for its camera) | Other phones may use volume up | Configurable key |
+| Quick launch triggered inside the app | Conflicts with "ask a question" | The service ignores keys while the app is in front | — | — |
+| Accessibility service turned off by the system | Quick launch stops | Settings shows its state and links to the switch | — | — |
+
+## 41. Layer 10: Interface and accessibility
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Colour-blind or low-vision users | States confused | Every state has words, its own shape and border style; contrast ≥ 7:1 (tested) | — | — |
+| Very large system fonts | Clipped or overlapping text | Text sizes combine with the system scale; titles shrink to fit; stacked layouts at large sizes | Extreme sizes on small screens | Scrollable safety card |
+| Motion sensitivity | Discomfort from animation | Reduced motion follows the system setting and a manual switch; no flashing | — | — |
+| TalkBack running together with app speech | Double speech | Live region used only when app audio is off | — | Deeper TalkBack integration |
+| Depth view looking like "waves" | Visual noise | Smooth gradient by default; range adapts slowly; depth view optional | — | — |
+| Status bar / navigation bar overlap | Controls hidden | Window insets applied; frame drawn inside the bars | — | — |
+
+## 42. Layer 11: Platform, performance and heat
+
+| Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
+|---|---|---|---|---|
+| Phone heating on a long walk | Throttling slows everything | Frame gate cut CPU from ~85 % to ~26 %; frame rate by activity; heat shown and spoken once | Android may throttle the processor itself | Optional automatic slowdown (`heatThrottle`); lower depth rate when standing |
+| Battery running low | Phone dies mid-walk | Spoken low-battery warning | — | Power-saving profile below 15 % (stop the language model, lower frame rate) |
+| A frame throws an exception | Safety loop stops silently | Caught per frame; SAFETY PAUSED shown; loop continues | — | — |
+| Memory pressure (language model ~1.5 GB) | App or server killed | Server restarted by the watchdog; safety layers independent of it | — | Unload the language model after long idle periods |
+| App logging throttled by the OS | Missing diagnostics | Per-frame logging minimised; field data written to a CSV file | — | — |
+| Different phone model | Different NPU, camera, sensors | Backend fallback; lens FOV read at calibration; missing sensors reported | Other NPUs may need recompiled models | Per-device model compilation |
+
+---
+
+# Future scope: roadmap to reduce the remaining risk
+
+| Priority | Improvement | Risk it reduces |
+|---|---|---|
+| 1 | **Foreground service** keeping perception, fall detection and the siren alive with the screen off | Fall missed when the app is not in front; camera paused by the system |
+| 2 | **Detector retrained on Indian street data** (auto-rickshaws, potholes, open drains, speed breakers, poles, manholes) | Unnamed hazards, drains missed by depth alone |
+| 3 | **Metric depth model** (indoor + outdoor) alongside the floor ruler | Distance errors before calibration and at long range |
+| 4 | **Glass detection** (segmentation model and specular cues) | Glass doors and walls |
+| 5 | **Slow-fall detection** (impact or lying still without free fall) | Falls from sitting, slides to the floor |
+| 6 | **Harder-to-silence siren** (2 s hold) and **speaker-forced siren** | Accidental silencing; siren lost in earphones |
+| 7 | **Longer-range vehicle tracking** with Kalman filtering | Late warnings for fast vehicles far away |
+| 8 | **Face blurring** in black-box images | Bystander privacy |
+| 9 | **Safety speech on the alarm stream** | Muted media volume |
+| 10 | **Continuous self-calibration** (stride and ruler from every walk) | Drift after the one-time calibration |
+| 11 | **Telugu / Hindi OCR** for boards and bus numbers | Local-language signs unread |
+| 12 | **Ramp and escalator announcements** | Moving steps and slopes not named |
+
+---
+
+# Part VIII — Safety, privacy and known limits
 
 **Safety principles**
 - Never tells the user it is safe to walk, cross or go; the cane stays primary.
@@ -1055,7 +1275,7 @@ Field verification uses the Diagnostics screen and the drop-off CSV log.
 
 ---
 
-# Part VIII — Project structure and build
+# Part IX — Project structure and build
 
 ```
 app/src/main/java/app/nadaka/
