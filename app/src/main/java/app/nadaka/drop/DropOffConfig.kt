@@ -82,7 +82,6 @@ object DropOffConfig {
     var FEATURELESS_STD = 5f            // grey-level std over the ROI
 
     // Haptics.
-    const val POSSIBLE_HAPTIC_INTERVAL_MS = 1500L
 
     // Barometer (optional; the iQOO I2501 has none).
     var BAROMETER_SHORT_ALPHA = 0.3f

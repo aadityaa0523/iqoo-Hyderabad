@@ -112,5 +112,6 @@ fun safetyOf(s: HudState): Safety {
         return Safety(Level.CAUTION, Glyph.WARN, "OBSTACLE", null, "Low object in your path.", it, "AHEAD")
     }
     if (s.mode == "SITTING") return Safety(Level.INFO, Glyph.PAUSE, "RESTING", null, "Sitting. Alerts are quiet.", status = "SAFETY ACTIVE")
+    if (!s.clear) return Safety(Level.CALM, Glyph.WAIT, "CHECKING", null, "Making sure the path stays clear.")
     return Safety(Level.CALM, Glyph.CHECK, "PATH CLEAR", null, "Nothing in your path.")
 }

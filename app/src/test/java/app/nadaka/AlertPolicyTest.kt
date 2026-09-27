@@ -17,7 +17,7 @@ class AlertPolicyTest {
 
     @Test fun shakyObjectIsSilentUnlessTouching() {
         assertEquals(0, AlertPolicy().say(listOf(track(1, metres = 1.2f).also { it.score = 0.3f }), 0).size)
-        assertEquals(listOf("chair, very close, 12 o'clock."), AlertPolicy().say(listOf(track(2, metres = 0.5f).also { it.score = 0.3f }), 0))
+        assertEquals(listOf("Blocked ahead, chair."), AlertPolicy().say(listOf(track(2, metres = 0.5f).also { it.score = 0.3f }), 0))
     }
 
     @Test fun halfVisibleEdgeObjectOnlyWhenTouching() {
@@ -52,7 +52,7 @@ class AlertPolicyTest {
         assertEquals(emptyList<String>(), p.say(listOf(track(1, metres = 6f)), 0)) // beyond 5 m: silent
         assertEquals(listOf("Chair, 3 metres, 12 o'clock."), p.say(listOf(track(2, metres = 3.1f)), 0))
         assertEquals(emptyList<String>(), p.say(listOf(track(2, metres = 3f)), 10_000)) // already told
-        assertEquals(emptyList<String>(), p.say(listOf(track(3, cx = 0.95f, metres = 1.2f)), 20_000)) // half out of frame
+        assertEquals(emptyList<String>(), AlertPolicy().say(listOf(track(3, cx = 0.95f, metres = 1.2f)), 0)) // half out of frame
         assertEquals(listOf("chair close, 1 metre, 12 o'clock."), AlertPolicy().say(listOf(track(4, metres = 1.2f)), 0))
     }
 
@@ -164,5 +164,48 @@ class AlertPolicyTest {
         assertEquals("12 o'clock", clock(0f))
         assertEquals("1 o'clock", clock(Math.toRadians(30.0).toFloat()))
         assertEquals("11 o'clock", clock(Math.toRadians(-30.0).toFloat()))
+    }
+
+    @Test fun routineWaitsUntilTheSentenceHasFinished() {
+        val p = AlertPolicy()
+        val chair = listOf(track(1, metres = 2.4f))
+        assertEquals(0, p.decide(chair, Health.OK, 0, canTalk = false).size) // still speaking: wait
+        assertEquals(1, p.decide(chair, Health.OK, 100, canTalk = true).size)
+    }
+
+    @Test fun blockedAheadInterruptsEvenWhileSpeaking() {
+        val a = AlertPolicy().decide(listOf(track(1, metres = 0.5f)), Health.OK, 0, canTalk = false).single()
+        assertEquals("Blocked ahead, chair.", a.text)
+        assertEquals(Buzz.WARN, a.buzz) // WARN = cuts off the current sentence
+    }
+
+    @Test fun threePeopleAreOneCrowdNotThreeAlerts() {
+        val people = listOf(
+            track(1, "person", metres = 3f), track(2, "person", cx = 0.3f, metres = 4f),
+            track(3, "person", cx = 0.7f, approaching = true, metres = 5f),
+        )
+        assertEquals(listOf("Crowd ahead."), AlertPolicy().say(people, 0))
+    }
+
+    @Test fun nearestIsToldFirstWhateverItIs() {
+        val said = AlertPolicy().say(listOf(
+            track(1, "car", cx = 0.6f, approaching = true, metres = 5f),
+            track(2, "chair", cx = 0.45f, approaching = true, metres = 3f),
+        ), 0)
+        assertEquals("chair approaching, 3 metres, 12 o'clock.", said.first())
+    }
+
+    @Test fun pathClearOnlyAfterFiveQuietSecondsAndOnce() {
+        val p = AlertPolicy()
+        assertEquals(1, p.say(listOf(track(1, metres = 2.4f)), 0).size)
+        assertEquals(emptyList<String>(), p.say(emptyList(), 3_000)) // gone, but not for long enough
+        assertEquals(listOf("Path clear."), p.say(emptyList(), Settings.pathClearMs + 100))
+        assertEquals(emptyList<String>(), p.say(emptyList(), 20_000)) // once
+    }
+
+    @Test fun neverPathClearWhileTheDepthIsUnsure() {
+        val p = AlertPolicy()
+        p.say(listOf(track(1, metres = 2.4f)), 0)
+        assertEquals(emptyList<String>(), p.say(emptyList(), 8_000, hz = Hazards(unsure = true)))
     }
 }

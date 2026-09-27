@@ -165,7 +165,7 @@ class DropTest {
         val p = DropPipeline(false)
         val o = run(p, listOf(step(seed = 1), step(seed = 2), step(seed = 3)))
         assertEquals(listOf(DropState.SAFE, DropState.POSSIBLE_DROP, DropState.CONFIRMED_DROP), states(o))
-        assertEquals(DropHaptic.POSSIBLE_PULSE, o[1].haptic)
+        assertEquals(DropHaptic.NONE, o[1].haptic) // half sure: never felt
         assertEquals(DropHaptic.CONFIRMED_ESCALATING, o[2].haptic)
     }
 

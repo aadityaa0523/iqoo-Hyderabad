@@ -109,11 +109,13 @@ class DropStateMachine {
     }
 }
 
-enum class DropHaptic { NONE, POSSIBLE_PULSE, CONFIRMED_ESCALATING, CONFIRMED_MAX }
+enum class DropHaptic { NONE, CONFIRMED_ESCALATING, CONFIRMED_MAX }
 
-/** Possible: one subdued pulse at most every 1.5 s. Confirmed: once, on the rising edge; maximum if descending. */
+/**
+ * Only a CONFIRMED drop is felt (once, on the rising edge; maximum if descending). A possible drop is shown on screen
+ * but never vibrated or spoken: a half-sure warning trains the user to ignore the real one.
+ */
 class DropHapticController {
-    private var lastPossibleMs = -1_000_000L
     private var prev = DropState.SAFE
 
     fun update(now: Long, state: DropState, descending: Boolean): DropHaptic {
@@ -121,9 +123,6 @@ class DropHapticController {
         prev = state
         return when {
             rising -> if (descending) DropHaptic.CONFIRMED_MAX else DropHaptic.CONFIRMED_ESCALATING
-            state == DropState.POSSIBLE_DROP && now - lastPossibleMs >= C.POSSIBLE_HAPTIC_INTERVAL_MS -> {
-                lastPossibleMs = now; DropHaptic.POSSIBLE_PULSE
-            }
             else -> DropHaptic.NONE
         }
     }

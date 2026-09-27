@@ -81,7 +81,9 @@ object Settings {
     var minHits = 5 // frames an object must be seen before it is spoken
     var speechGapMs = 2500L
     var habituationGrowth = 1.5f // re-announce a known object only once it looks 50% bigger
-    var crowdCount = 4
+    var crowdCount = 3 // this many people = "Crowd ahead", not person by person
+    var pathClearMs = 5000L // nothing in the way for this long before "Path clear"
+    var afterSpeechMs = 400L // breath between two sentences
     var crowdRepeatMs = 10000L
     var healthPersistMs = 1000L
     var healthRepeatMs = 8000L
@@ -966,14 +968,15 @@ class MainActivity : ComponentActivity() {
             feedback.warn(words); said = words; saidLevel = Buzz.WARN
         }
         // Stairs going up: say it once, again every few seconds while it stays in view.
-        dropNow?.stairsUpM?.takeIf { !it.isNaN() && !alarmOn && t2 - stairsSaidMs >= Settings.stairsRepeatMs }?.let {
+        dropNow?.stairsUpM?.takeIf { !it.isNaN() && !alarmOn && !feedback.busy && t2 - stairsSaidMs >= Settings.stairsRepeatMs }?.let {
             stairsSaidMs = t2
             val n = dropNow.stairsUpSteps
             val words = "Stairs going up ahead, ${metres(it)}." + (if (n >= 2) " About $n steps." else "")
-            feedback.play(listOf(Alert(words, Buzz.WARN, Tacton.HEAD, "Stairs up."))); said = words; saidLevel = Buzz.WARN
+            feedback.play(listOf(Alert(words, Buzz.AHEAD, Tacton.HEAD, "Stairs up."))); said = words; saidLevel = Buzz.AHEAD
         }
         if (!alarmOn) { walkStraight(t2); readBus(t2, tracks); sceneFind(t2, frame) }
-        policy.decide(tracks, health, t2, hazards.copy(dropAtM = null), activity.current).takeIf { it.isNotEmpty() && finder == null && !alarmOn }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
+        val unsure = dropNow?.state.let { it != null && it != app.nadaka.drop.DropState.SAFE && it != app.nadaka.drop.DropState.CONFIRMED_DROP }
+        policy.decide(tracks, health, t2, hazards.copy(dropAtM = null, unsure = unsure || confirmed), activity.current, canTalk = !feedback.busy).takeIf { it.isNotEmpty() && finder == null && !alarmOn }?.let { feedback.play(it); said = caption(it); saidLevel = it.maxOf { a -> a.buzz } }
 
         if (!alarmOn) feedback.haptics.drop(dropHaptic) // after the alert batch so nothing overrides it; ignores sound settings
 
@@ -994,7 +997,7 @@ class MainActivity : ComponentActivity() {
         if (t2 - lastStatusLogMs > 5000) { lastStatusLogMs = t2; Log.i(TAG, "${detector.backend} $fps fps det ${t2 - t1}ms depth ${depthMs}ms  ${tracks.joinToString { "${it.label}#${it.id} %.1fm${if (it.approaching) "!" else ""}".format(it.metres) }}") }
         val st = HudState(
             mode = activity.current.name, heat = heat.tier, lens = Settings.zoom, backend = detector.backend, depthBackend = depth.backend, fps = fps.toInt(), detMs = t2 - t1, depthMs = depthMs,
-            level = saidLevel, health = health, rec = rec, tracks = tracks, hazards = hazards, said = said,
+            level = saidLevel, health = health, rec = rec, tracks = tracks, clear = policy.clear, hazards = hazards, said = said,
             depth = depthAnalyzer.latest(), drop = dropNow, imgW = frame.width, imgH = frame.height,
             loading = false, alarm = when { fallPending -> "FALL"; emergency.active -> "SIREN"; else -> null }, floorTrusted = depthAnalyzer.floorTrusted, calibrating = calibration?.instruction, sensorError = if (motionMissing) "No motion sensor." else null,
             baroHPa = if (pressure == null) Float.NaN else drop.barometer.filteredPressure, atMs = t2,
@@ -1014,6 +1017,16 @@ class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
     private val result = VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
     private val approach = VibrationEffect.createWaveform(longArrayOf(0, 60, 40, 60, 40, 60, 40, 200), -1)
 
+    @Volatile private var doneAtMs = 0L
+
+    /**
+     * A sentence is still being spoken (or just ended, a short breath): routine alerts wait for it to finish.
+     * Only danger ([Buzz.WARN]) may cut in. Talking over yourself is how a blind user gets confused.
+     */
+    val busy: Boolean
+        get() = answering || tts.isSpeaking || local?.isSpeaking == true ||
+            SystemClock.elapsedRealtime() - doneAtMs < Settings.afterSpeechMs
+
     /** True while an answer (Gemma, "what's ahead", "is it safe") is being spoken: routine alerts must not cut it off. */
     @Volatile var answering = false
         private set
@@ -1021,9 +1034,9 @@ class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
     /** Shared by the English and the Hindi / Telugu voice: an answer finishing starts the quiet gap. */
     private val progress = object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
-            override fun onDone(id: String?) { if (id == ANSWER) answerEnded() }
-            @Deprecated("") override fun onError(id: String?) { if (id == ANSWER) answerEnded() }
-            override fun onStop(id: String?, interrupted: Boolean) { if (id == ANSWER) answerEnded() }
+            override fun onDone(id: String?) { doneAtMs = SystemClock.elapsedRealtime(); if (id == ANSWER) answerEnded() }
+            @Deprecated("") override fun onError(id: String?) { doneAtMs = SystemClock.elapsedRealtime(); if (id == ANSWER) answerEnded() }
+            override fun onStop(id: String?, interrupted: Boolean) { doneAtMs = SystemClock.elapsedRealtime(); if (id == ANSWER) answerEnded() }
         }
 
     init {
@@ -1103,8 +1116,8 @@ class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
 
     fun say(text: String, strong: Boolean = false) {
         if (!Prefs.audioOn || listening() || inGap) { if (strong && Prefs.hapticOn) vibrator.vibrate(result); return }
-        // Never cut off an answer: queue behind it.
-        speak(text, if (answering) TextToSpeech.QUEUE_ADD else TextToSpeech.QUEUE_FLUSH, null, text)
+        // Never cut off a sentence: queue behind it.
+        speak(text, TextToSpeech.QUEUE_ADD, null, text)
         if (strong) vibrator.vibrate(result)
     }
 
@@ -1135,11 +1148,14 @@ class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
         if (Settings.hapticsFirst) {
             alerts.firstNotNullOfOrNull { it.tacton }?.let(haptics::play)
             val words = alerts.mapNotNull { it.short }
-            if (words.isNotEmpty()) speak(words.joinToString(" "), TextToSpeech.QUEUE_FLUSH, null, "short")
+            if (words.isNotEmpty()) speak(words.joinToString(" "), mode(alerts), null, "short")
             return
         }
         speakAll(alerts)
     }
+
+    /** Danger interrupts whatever is being said; anything else waits until the current sentence has finished. */
+    private fun mode(alerts: List<Alert>) = if (alerts.any { it.buzz == Buzz.WARN }) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
 
     private companion object {
         const val ANSWER = "answer"
@@ -1147,7 +1163,7 @@ class Feedback(private val ctx: Context) : TextToSpeech.OnInitListener {
 
     /** Speech mode: full sentences, most urgent first; the strongest buzz of the batch. */
     private fun speakAll(alerts: List<Alert>) {
-        alerts.forEachIndexed { i, a -> speak(a.text, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, a.text) }
+        alerts.forEachIndexed { i, a -> speak(a.text, if (i == 0) mode(alerts) else TextToSpeech.QUEUE_ADD, null, a.text) }
         if (Prefs.hapticOn) vibrator.vibrate(
             when (alerts.maxOf { it.buzz.ordinal }) {
                 Buzz.WARN.ordinal -> result

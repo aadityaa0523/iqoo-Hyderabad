@@ -9,7 +9,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /** The haptic vocabulary (docs/haptics.md). Meaning is carried by rhythm; intensity only adds urgency. */
-enum class Tacton { DROP, DROP_POSSIBLE, VEER_LEFT, VEER_RIGHT, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
+enum class Tacton { DROP, VEER_LEFT, VEER_RIGHT, HEAD, APPROACH, SOUND, CANT_SEE, TICK }
 
 /** Parking-sensor mapping: pulse interval for an obstacle at [m] metres in my path, or null = no pulse. */
 fun pulseIntervalMs(m: Float): Long? = when {
@@ -69,10 +69,9 @@ class Haptics(ctx: Context) {
         if (!Prefs.hapticOn) return
         val e = when (h) {
             DropHaptic.NONE -> return
-            DropHaptic.POSSIBLE_PULSE -> effect(Tacton.DROP_POSSIBLE)
-            // Confirmed drop: the stop rhythm, kept up for Settings.dropHapticMs (5 s) so it can't be missed.
-            DropHaptic.CONFIRMED_ESCALATING -> wave(*dropPulses(350, 150, listOf(170, 215)))
-            DropHaptic.CONFIRMED_MAX -> maxWave(*dropPulses(400, 100, emptyList()))
+            // Confirmed drop: fast strong pulses for Settings.dropHapticMs (5 s), unlike any other pattern.
+            DropHaptic.CONFIRMED_ESCALATING -> wave(*dropPulses(110, 70, listOf(215)))
+            DropHaptic.CONFIRMED_MAX -> maxWave(*dropPulses(110, 50, emptyList()))
         }
         quietUntilMs = SystemClock.elapsedRealtime() + 1200
         v.vibrate(e, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
@@ -98,9 +97,7 @@ class Haptics(ctx: Context) {
      */
     private fun effect(t: Tacton): VibrationEffect = when (t) {
         // STOP: three long pulses, each heavier than the last. The one pattern that must never be missed.
-        Tacton.DROP -> wave(0 to 0, 350 to 170, 200 to 0, 350 to 215, 200 to 0, 350 to 255)
-        // Edge ahead, not yet confirmed: one short soft pulse.
-        Tacton.DROP_POSSIBLE -> wave(0 to 0, 90 to 110)
+        Tacton.DROP -> wave(*dropPulses(110, 70, listOf(215)))
         // Walk straight: one long pulse = you drifted left (turn right); two short = drifted right (turn left).
         Tacton.VEER_LEFT -> wave(0 to 0, 400 to 200)
         Tacton.VEER_RIGHT -> wave(0 to 0, 120 to 200, 120 to 0, 120 to 200)
@@ -141,8 +138,7 @@ class Haptics(ctx: Context) {
 /** "Teach me the vibrations": each pattern with its meaning, as (spoken, tacton) steps. */
 val LESSON = listOf(
     "Ticks mean something is in your path. Faster ticks, closer." to Tacton.TICK,
-    "One soft pulse: an edge ahead. Slow down and check with your cane." to Tacton.DROP_POSSIBLE,
-    "Three pulses, each stronger: stop, drop-off." to Tacton.DROP,
+    "Fast strong pulses: stop, drop-off." to Tacton.DROP,
     "Walking straight: one long pulse means you drifted left, turn right." to Tacton.VEER_LEFT,
     "Two short pulses means you drifted right, turn left." to Tacton.VEER_RIGHT,
     "Two rising swells: something at head height." to Tacton.HEAD,

@@ -687,9 +687,10 @@ SENSOR_BLOCKED and PATH_NOT_TRAVERSABLE override everything and clear the histor
 Path not traversable: severe blur; a wall (centre and bottom of the view at nearly the same disparity, ratio ≥ 0.85,
 or the centre nearer than 0.6 m); or a featureless view with no trusted depth.
 
-**(h) Output.** POSSIBLE: one soft pulse at most every 1.5 s. CONFIRMED (rising edge): "Stop. Drop ahead, 2 metres"
-(or "Stop. Stairs down ahead … At least N steps") and **5 s of vibration**: ten 350 ms pulses 150 ms apart, the first
-three rising 170 → 215 → 255, then full strength; if a barometer shows descent, ten full-strength 400 ms pulses.
+**(h) Output.** POSSIBLE: shown on screen only; never vibrated or spoken, because a half-sure warning trains the
+user to ignore the real one. CONFIRMED (rising edge): "Stop. Drop ahead, 2 metres" (or "Stop. Stairs down ahead … At
+least N steps"), spoken at once and cutting off any other sentence, and **5 s of fast vibration**: 110 ms pulses
+70 ms apart (the first at 215, then full strength); if a barometer shows descent, full-strength pulses 50 ms apart.
 
 ### 23.2 Stairs and step counting (`StairsUpAnalyzer`)
 **Height profile.** From row 96 % up to 30 % of the frame in 1 % steps, the median of 5 central columns is turned into
@@ -735,12 +736,17 @@ A state must persist 1 s before it is announced; hazards from an unusable frame 
 ### 24.1 Order
 1. Camera health (after persistence).
 2. In a vehicle: silence except camera health.
-3. Drop-offs (from the state machine, on the rising edge) and head height.
-4. **Approaching** objects, within 8 m, the one with the smallest `τ / priority`.
-5. **Close** objects in the walking path (within 1.5 m walking, 0.75 m otherwise), the most urgent one.
-6. Waist-height and unnamed floor obstacles.
-7. Awareness (one message at a time, with a 2.5 s gap between messages):
-   - a **crowd** (4+ people within 10 m) instead of repeated "person";
+3. **Emergencies**, spoken at once even over another sentence: confirmed drop-offs, head height, and **"Blocked
+   ahead"** (a named object or a depth obstacle in the path closer than 0.75 m).
+4. Everything below is **routine**: it is only decided once the previous sentence has finished (plus a 0.4 s breath),
+   so sentences never overlap or cut each other off.
+5. A **crowd** (3+ people within 10 m) is "Crowd ahead." once per 10 s; individual people are then never announced.
+6. **Approaching** objects within 8 m, the nearest first.
+7. **Close** objects in the walking path (0.75 to 1.5 m walking), the nearest one; waist-height and unnamed floor obstacles.
+8. Awareness (one message at a time, with a 2.5 s gap between messages):
+   - **"Path clear."** once, after something was announced and nothing at all (object in the path within 5 m,
+     approaching object, floor, waist or head obstacle, possible drop, unjudgeable path, camera problem) has been in
+     the way for 5 s. It reports what the sensors see, never a permission to cross;
    - **moving** objects only when coming closer (own speed > 0.6 m/s toward the user) and within 6 m;
    - **static** objects within 5 m in the walking path, once, and again only when they loom 50 % larger or after 15 s
      for the same label in the same direction.
@@ -748,10 +754,10 @@ A state must persist 1 s before it is announced; hazards from an unusable frame 
 ### 24.2 Priority and urgency
 ```
 priority: vehicle 1.8 · person 1.5 · animal 1.4 · seat / furniture / street furniture 1.2 · other 1.0
-urgency  = distance / priority          (smaller = announce first)
+urgency  = distance rounded to 0.5 m − 0.1 × (priority − 1)      (smaller = announce first)
 ```
-Example: a car at 3 m (3 / 1.8 = 1.67) is announced before a bag at 2 m (2 / 1.0 = 2.0) and a person at 2.8 m
-(2.8 / 1.5 = 1.87).
+The nearer thing is always told first, whatever it is; the class only breaks a tie within the same half metre.
+Example: a chair at 3 m is announced before a car at 5 m; a car and a bag both at 2 m: the car first.
 
 ### 24.3 Never a green light (`Voice.kt → SafetyGate`)
 - Questions about safety ("can I cross", "is the path clear", "सुरक्षित", "దాట"…) are recognised first and answered only
@@ -769,8 +775,7 @@ Repeat limits per hazard (3.5 s), per close object (4 s), per moving object (12 
 ### 25.1 Haptic vocabulary (`Haptics.kt`)
 | Pattern | Meaning |
 |---|---|
-| Ten pulses, strength rising, 5 s | Stop: drop-off confirmed |
-| One soft 90 ms pulse | Possible edge ahead |
+| Fast strong pulses for 5 s | Stop: drop-off confirmed (nothing for a possible edge) |
 | Two rising swells | Head height |
 | Four taps getting faster | Something coming at you |
 | Long–short–long | Horn, siren or dog nearby |
@@ -1079,7 +1084,7 @@ them.
 | Irrelevant classes (cutlery, fruit, toothbrush) | Noise in alerts and lists | 27 classes dropped at the detector | — | — |
 | Objects not in the 80 classes (door, pole, pothole, speed breaker, auto-rickshaw) | Not named | Depth hazards (floor obstacle, waist, head height, drop-off, blocked) cover the physical danger; the vision-language model finds doors and exits on request | Named alerts missing for auto-rickshaws and poles | Retrain the detector on Indian street data with extra classes (autorickshaw, pothole, speed breaker, open drain, pole) |
 | Very small or distant objects | Missed detections | Irrelevant for immediate safety (alerts are within 1.5–8 m) | Early warning for fast vehicles is limited | Higher input resolution or a tiled detection pass for the upper frame |
-| Crowds with overlapping people | Many overlapping boxes, spoken repeatedly | NMS; a crowd (4+ people within 10 m) is announced once as "crowd ahead" | Individuals inside the crowd are not tracked reliably | Crowd density estimation and a "follow the gap" hint |
+| Crowds with overlapping people | Many overlapping boxes, spoken repeatedly | NMS; a crowd (3+ people within 10 m) is announced once as "crowd ahead", people are then never announced one by one | Individuals inside the crowd are not tracked reliably | Crowd density estimation and a "follow the gap" hint |
 | Depth model on a blank wall or plain floor | Nearly uniform output, no gradient | Featureless view with no trusted depth → "path not traversable" (never a drop); floor ruler requires a flat, consistent floor | — | — |
 | Depth through glass or into mirrors | Glass door reads as open space | Stated limitation; the drop pipeline's reflection guard prevents false stops on mirror-like floors | Glass doors and walls are not warned about | Dedicated glass segmentation model; specular-highlight and frame detection; ultrasonic accessory |
 | Relative depth scale changes from scene to scene | Wrong metres | Floor ruler relearned while walking; drop test compares near and far side in the same frame; distances beyond 10 m discarded | Distances are approximate before calibration | Metric depth model fine-tuned for indoor and outdoor scenes |
@@ -1139,7 +1144,7 @@ them.
 
 | Edge case | What would go wrong | How Nadaka handles it | Remaining risk | Future reduction |
 |---|---|---|---|---|
-| Many objects at once | Information overload | At most a few alerts per decision; priority × distance ordering; crowd grouping | — | — |
+| Many objects at once | Information overload | A new sentence only after the last one finished (danger excepted); nearest first; crowd grouping | — | — |
 | Same object announced every frame | Nagging | Per-object and per-direction repeat limits (3.5–15 s); static objects once unless they loom | — | — |
 | User asks "is it safe to cross?" | A language model says "yes" | Safety questions answered only from detections; never-green-light filter on all spoken text, including Hindi and Telugu phrasing | — | — |
 | Alert while the user is asking a question | The recogniser hears the app | Nothing spoken while the microphone is open; vibration continues | — | — |

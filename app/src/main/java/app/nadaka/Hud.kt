@@ -16,6 +16,7 @@ data class HudState(
     val lens: Float = 1f,
     val rec: String = "",
     val tracks: List<Track> = emptyList(),
+    val clear: Boolean = true, // nothing in the way for Settings.pathClearMs (AlertPolicy.clear)
     val hazards: Hazards = Hazards(),
     val said: String = "",
     val level: Buzz? = null,
